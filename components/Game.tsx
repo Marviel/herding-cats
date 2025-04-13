@@ -68,6 +68,17 @@ interface NPC {
     convincedThroughDialogue: boolean; // New property to track if convinced through dialogue
 }
 
+// Interface for the herding dog
+interface HerdingDog {
+    position: Position;
+    targetCatId: number | null;
+    isInteracting: boolean;
+    speed: number;
+    currentMessage: string | null;
+    messageTimer: number;
+    cooldownTimer: number;
+}
+
 // Helper functions
 const calculateDistance = (pos1: Position, pos2: Position): number => {
     return Math.sqrt(Math.pow(pos2.x - pos1.x, 2) + Math.pow(pos2.z - pos1.z, 2));
@@ -1069,172 +1080,377 @@ function GameManager({
     setNpcs: React.Dispatch<React.SetStateAction<NPC[]>>;
     waypoints: Waypoint[];
 }) {
-    // Collection of possible snarky comments
-    const snarkyComments = [
-        "I've wasted enough time here.",
-        "This place is boring. I'm out!",
-        "30 seconds of my life I'll never get back.",
-        "Okay, I came here. Happy now?",
-        "That's enough of this place.",
-        "Time's up! I'm going somewhere more interesting.",
-        "I've fulfilled my obligation. Bye!",
-        "The things I do for others...",
-    ];
-
-    // Update NPC state including waypoint selection, dwelling, and convinced timer
+    // Update NPCs on each frame
     useFrame((_, delta) => {
-        setNpcs(currentNpcs =>
-            currentNpcs.map(npc => {
-                // Find the target waypoint
-                const targetWaypoint = waypoints.find(w => w.isTarget);
-                if (!targetWaypoint) return npc;
+        setNpcs(currentNpcs => {
+            // If all are convinced, don't move them
+            if (currentNpcs.every(npc => npc.isConvinced)) return currentNpcs;
 
-                // Check if NPC is at the target waypoint
-                const distanceToTarget = calculateDistance(npc.position, targetWaypoint.position);
-                const atTargetPosition = distanceToTarget <= targetWaypoint.radius + 1.0;
+            return currentNpcs.map(npc => {
+                // Don't move if interacting with player
+                if (npc.isInteracting) return npc;
 
-                // Handle when an NPC leaves the target area but was previously convinced
-                if (npc.isConvinced && !atTargetPosition) {
-                    // If convinced cat leaves the target area, it's no longer convinced
-                    return {
-                        ...npc,
-                        isConvinced: false,
-                        convincedTimer: 0,
-                        snarkyComment: null,
-                        convincedThroughDialogue: false // Also reset this flag
+                // Handle convinced state
+                if (npc.isConvinced) {
+                    const targetWaypoint = waypoints.find(w => w.isTarget);
+                    if (!targetWaypoint) return npc;
+
+                    // Move to target waypoint
+                    const direction = {
+                        x: targetWaypoint.position.x - npc.position.x,
+                        z: targetWaypoint.position.z - npc.position.z
                     };
-                }
 
-                // Update read time countdown if response is complete
-                if (npc.isInteracting && npc.responseComplete && npc.readTimeRemaining > 0) {
-                    const newReadTime = Math.max(0, npc.readTimeRemaining - delta);
-
-                    // Auto-close dialogue when read time completes
-                    if (newReadTime <= 0 && !npc.isTyping) {
-                        return {
-                            ...npc,
-                            readTimeRemaining: 0,
-                            isInteracting: false, // Auto-close the dialogue
-                            responseComplete: false
-                        };
+                    // Normalize direction
+                    const distance = calculateDistance(npc.position, targetWaypoint.position);
+                    if (distance < targetWaypoint.radius) {
+                        // We've reached the target, stop moving
+                        return npc;
                     }
 
+                    const normalizedDirection = {
+                        x: direction.x / distance,
+                        z: direction.z / distance
+                    };
+
+                    // Move towards target
                     return {
                         ...npc,
-                        readTimeRemaining: newReadTime
+                        position: {
+                            x: npc.position.x + normalizedDirection.x * npc.speed,
+                            z: npc.position.z + normalizedDirection.z * npc.speed
+                        }
                     };
                 }
 
-                // Skip updates if interacting and not in read time
-                if (npc.isInteracting && !npc.responseComplete) return npc;
+                // Handle dwell time at waypoints
+                if (npc.currentWaypoint !== null) {
+                    const currentWaypoint = waypoints.find(w => w.id === npc.currentWaypoint);
+                    if (!currentWaypoint) return npc;
 
-                // Handle convinced state (only applies when at target)
-                if (npc.isConvinced && atTargetPosition) {
-                    // Update the timer
-                    const newTimer = npc.convincedTimer - delta;
-
-                    // If timer expired
-                    if (newTimer <= 0) {
-                        // Choose a random snarky comment
-                        const randomComment = snarkyComments[Math.floor(Math.random() * snarkyComments.length)];
-
-                        // Choose a new random waypoint that isn't the target
-                        const availableWaypoints = waypoints.filter(w => !w.isTarget);
+                    if (npc.dwellTime > 0) {
+                        return {
+                            ...npc,
+                            dwellTime: npc.dwellTime - delta
+                        };
+                    } else {
+                        // Choose a new waypoint
+                        const availableWaypoints = waypoints.filter(w => w.id !== npc.currentWaypoint && w.id !== npc.lastWaypoint);
                         const randomWaypoint = availableWaypoints[Math.floor(Math.random() * availableWaypoints.length)];
 
                         return {
                             ...npc,
-                            isConvinced: false,
-                            convincedTimer: 0,
-                            snarkyComment: null,
                             targetWaypoint: randomWaypoint.id,
-                            lastWaypoint: npc.targetWaypoint,
                             currentWaypoint: null,
-                            convincedThroughDialogue: false, // Reset this flag too
-                            // Display snarky comment briefly before leaving
-                            conversationHistory: [
-                                ...npc.conversationHistory,
-                                {
-                                    role: 'assistant' as const,
-                                    content: randomComment
-                                }
-                            ]
+                            lastWaypoint: npc.currentWaypoint
+                        };
+                    }
+                }
+
+                // If NPC has a target waypoint, move towards it
+                if (npc.targetWaypoint !== null) {
+                    const targetWaypoint = waypoints.find(w => w.id === npc.targetWaypoint);
+                    if (!targetWaypoint) return npc;
+
+                    const direction = {
+                        x: targetWaypoint.position.x - npc.position.x,
+                        z: targetWaypoint.position.z - npc.position.z
+                    };
+
+                    // Normalize direction
+                    const distance = calculateDistance(npc.position, targetWaypoint.position);
+
+                    // Check if we've reached the waypoint
+                    if (distance < targetWaypoint.radius) {
+                        // We've reached the target, start dwelling
+                        return {
+                            ...npc,
+                            currentWaypoint: npc.targetWaypoint,
+                            targetWaypoint: null,
+                            dwellTime: 3 + Math.random() * 2 // Dwell for 3-5 seconds
                         };
                     }
 
-                    // Just update the timer
+                    // Normalize direction
+                    const normalizedDirection = {
+                        x: direction.x / distance,
+                        z: direction.z / distance
+                    };
+
+                    // Move towards target
                     return {
                         ...npc,
-                        convincedTimer: newTimer,
-                        // Show a snarky comment when there's 5 seconds left
-                        snarkyComment: newTimer <= 5 && !npc.snarkyComment
-                            ? "I'm not staying here much longer..."
-                            : npc.snarkyComment
+                        position: {
+                            x: npc.position.x + normalizedDirection.x * npc.speed,
+                            z: npc.position.z + normalizedDirection.z * npc.speed
+                        }
                     };
                 }
 
-                // Regular waypoint behavior (check if at waypoint and need to wait)
-                if (npc.targetWaypoint !== null) {
-                    const currentTargetWaypoint = waypoints.find(w => w.id === npc.targetWaypoint);
-                    if (currentTargetWaypoint) {
-                        const distance = calculateDistance(npc.position, currentTargetWaypoint.position);
+                // No waypoint, just return the NPC as is
+                return npc;
+            });
+        });
+    });
 
-                        // Check if NPC is at the waypoint's radius
-                        if (distance <= currentTargetWaypoint.radius + 0.5) {
-                            // Check if NPC has reached the target waypoint AND was previously convinced through dialogue
-                            if (currentTargetWaypoint.isTarget && npc.convincedThroughDialogue) {
-                                console.log(`NPC ${npc.id} reached target and is convinced through dialogue`);
-                                return {
-                                    ...npc,
-                                    isConvinced: true,
-                                    convincedTimer: 30, // 30 seconds timer
-                                    snarkyComment: null,
-                                    dwellTime: 0
-                                };
-                            }
+    return null;
+}
 
-                            // Normal waypoint dwelling logic
-                            // If at waypoint, increase dwell time
-                            const newDwellTime = npc.dwellTime + delta;
+// Dog component
+function Dog({
+    position,
+    targetCat,
+    isInteracting,
+    currentMessage
+}: {
+    position: Position;
+    targetCat: NPC | null;
+    isInteracting: boolean;
+    currentMessage: string | null;
+}) {
+    const groupRef = useRef<THREE.Group>(null);
+    const [rotation, setRotation] = useState(0);
+    const [walkAnim, setWalkAnim] = useState(0);
 
-                            // If dwell time is complete (2 seconds), choose new waypoint
-                            if (newDwellTime >= 2) {
-                                // Choose a new random waypoint that isn't the target and isn't the current one
-                                const availableWaypoints = waypoints.filter(w =>
-                                    !w.isTarget &&
-                                    w.id !== npc.targetWaypoint &&
-                                    w.id !== npc.lastWaypoint
-                                );
+    // Update animation and rotation based on movement
+    useFrame((_, delta) => {
+        if (!groupRef.current) return;
 
-                                // If somehow no waypoints are available, allow repeating
-                                const waypointsToChooseFrom = availableWaypoints.length > 0
-                                    ? availableWaypoints
-                                    : waypoints.filter(w => !w.isTarget && w.id !== npc.targetWaypoint);
+        // Update position
+        groupRef.current.position.x = position.x;
+        groupRef.current.position.z = position.z;
 
-                                const randomWaypoint = waypointsToChooseFrom[Math.floor(Math.random() * waypointsToChooseFrom.length)];
+        // Calculate rotation to face target if there is one
+        if (targetCat) {
+            const targetRotation = Math.atan2(
+                targetCat.position.x - position.x,
+                targetCat.position.z - position.z
+            );
+            setRotation(targetRotation);
 
-                                return {
-                                    ...npc,
-                                    dwellTime: 0,
-                                    currentWaypoint: npc.targetWaypoint,
-                                    lastWaypoint: npc.targetWaypoint,
-                                    targetWaypoint: randomWaypoint.id
-                                };
-                            }
+            // Update walking animation
+            setWalkAnim((prev) => (prev + delta * 10) % (Math.PI * 2));
+        }
+    });
 
-                            // Still dwelling
-                            return {
-                                ...npc,
-                                dwellTime: newDwellTime
-                            };
-                        }
-                    }
+    // Calculate limb animations for walking
+    const isWalking = targetCat !== null && !isInteracting;
+    const leftLegRotation = isWalking ? Math.sin(walkAnim) * 0.4 : 0;
+    const rightLegRotation = isWalking ? -Math.sin(walkAnim) * 0.4 : 0;
+    const tailWag = Math.sin(walkAnim * 2) * 0.3;
+
+    return (
+        <>
+            {/* Dog model */}
+            <group ref={groupRef} position={[position.x, 0.5, position.z]} rotation={[0, rotation + Math.PI, 0]}>
+                {/* Body */}
+                <mesh position={[0, 0, 0]} castShadow>
+                    <boxGeometry args={[0.8, 0.6, 1.2]} />
+                    <meshStandardMaterial color="#8B5A2B" />
+                </mesh>
+
+                {/* Head */}
+                <mesh position={[0, 0.4, -0.7]} castShadow>
+                    <boxGeometry args={[0.6, 0.6, 0.7]} />
+                    <meshStandardMaterial color="#8B5A2B" />
+                </mesh>
+
+                {/* Snout */}
+                <mesh position={[0, 0.25, -1.1]} castShadow>
+                    <boxGeometry args={[0.4, 0.3, 0.3]} />
+                    <meshStandardMaterial color="#9B6A3B" />
+                </mesh>
+
+                {/* Ears */}
+                <mesh position={[-0.25, 0.7, -0.7]} rotation={[0.2, 0, Math.PI / 4]} castShadow>
+                    <boxGeometry args={[0.2, 0.3, 0.1]} />
+                    <meshStandardMaterial color="#8B5A2B" />
+                </mesh>
+                <mesh position={[0.25, 0.7, -0.7]} rotation={[0.2, 0, -Math.PI / 4]} castShadow>
+                    <boxGeometry args={[0.2, 0.3, 0.1]} />
+                    <meshStandardMaterial color="#8B5A2B" />
+                </mesh>
+
+                {/* Eyes */}
+                <mesh position={[-0.15, 0.4, -1.05]} castShadow>
+                    <sphereGeometry args={[0.08, 16, 16]} />
+                    <meshStandardMaterial color="black" />
+                </mesh>
+                <mesh position={[0.15, 0.4, -1.05]} castShadow>
+                    <sphereGeometry args={[0.08, 16, 16]} />
+                    <meshStandardMaterial color="black" />
+                </mesh>
+
+                {/* Nose */}
+                <mesh position={[0, 0.25, -1.3]} castShadow>
+                    <sphereGeometry args={[0.1, 16, 16]} />
+                    <meshStandardMaterial color="black" />
+                </mesh>
+
+                {/* Legs */}
+                <group position={[0.3, -0.35, 0.4]} rotation={[leftLegRotation, 0, 0]}>
+                    <mesh position={[0, -0.2, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.5, 0.15]} />
+                        <meshStandardMaterial color="#8B5A2B" />
+                    </mesh>
+                </group>
+                <group position={[-0.3, -0.35, 0.4]} rotation={[rightLegRotation, 0, 0]}>
+                    <mesh position={[0, -0.2, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.5, 0.15]} />
+                        <meshStandardMaterial color="#8B5A2B" />
+                    </mesh>
+                </group>
+                <group position={[0.3, -0.35, -0.4]} rotation={[rightLegRotation, 0, 0]}>
+                    <mesh position={[0, -0.2, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.5, 0.15]} />
+                        <meshStandardMaterial color="#8B5A2B" />
+                    </mesh>
+                </group>
+                <group position={[-0.3, -0.35, -0.4]} rotation={[leftLegRotation, 0, 0]}>
+                    <mesh position={[0, -0.2, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.5, 0.15]} />
+                        <meshStandardMaterial color="#8B5A2B" />
+                    </mesh>
+                </group>
+
+                {/* Tail */}
+                <group rotation={[0, 0, tailWag]}>
+                    <mesh position={[0, 0.3, 0.8]} rotation={[0.5, 0, 0]} castShadow>
+                        <cylinderGeometry args={[0.05, 0.1, 0.6, 8]} />
+                        <meshStandardMaterial color="#8B5A2B" />
+                    </mesh>
+                </group>
+            </group>
+
+            {/* Speech bubble for dog */}
+            {currentMessage && (
+                <Html position={[position.x, 2, position.z]} center>
+                    <div className="bg-white text-black p-2 rounded-lg shadow-md max-w-xs">
+                        <p className="text-sm font-medium">{currentMessage}</p>
+                    </div>
+                </Html>
+            )}
+        </>
+    );
+}
+
+// DogManager component to handle dog AI and movement in Three.js context
+function DogManager({
+    dog,
+    setDog,
+    npcs,
+    setNpcs,
+    waypoints,
+    gameWon,
+    dogMessages,
+    handleDogCatInteraction
+}: {
+    dog: HerdingDog,
+    setDog: (dog: HerdingDog | ((prev: HerdingDog) => HerdingDog)) => void,
+    npcs: NPC[],
+    setNpcs: (npcs: NPC[] | ((prev: NPC[]) => NPC[])) => void,
+    waypoints: Waypoint[],
+    gameWon: boolean,
+    dogMessages: string[],
+    handleDogCatInteraction: (catId: number, message: string) => void
+}) {
+    // Handle dog AI and movement
+    useFrame((_, delta) => {
+        // Don't update if game is won
+        if (gameWon) return;
+
+        setDog(currentDog => {
+            // Create a copy we'll modify
+            const newDog = { ...currentDog };
+
+            // Process timers
+            if (newDog.cooldownTimer > 0) {
+                newDog.cooldownTimer -= delta;
+            }
+
+            if (newDog.messageTimer > 0) {
+                newDog.messageTimer -= delta;
+                if (newDog.messageTimer <= 0) {
+                    newDog.currentMessage = null;
+                }
+            }
+
+            // If dog is interacting, don't move
+            if (newDog.isInteracting) {
+                return newDog;
+            }
+
+            // Dog AI for target selection
+            if (newDog.targetCatId === null && newDog.cooldownTimer <= 0) {
+                // Find cats that aren't convinced and not interacting with player
+                const availableCats = npcs.filter(npc =>
+                    !npc.isConvinced &&
+                    !npc.isInteracting &&
+                    !npc.convincedThroughDialogue
+                );
+
+                if (availableCats.length > 0) {
+                    // Pick a random cat to target
+                    const randomCat = availableCats[Math.floor(Math.random() * availableCats.length)];
+                    newDog.targetCatId = randomCat.id;
+                }
+            }
+
+            // Move dog towards target cat
+            if (newDog.targetCatId !== null) {
+                const targetCat = npcs.find(npc => npc.id === newDog.targetCatId);
+
+                // If target is no longer valid (interacting with player or convinced), clear target
+                if (!targetCat || targetCat.isInteracting || targetCat.isConvinced || targetCat.convincedThroughDialogue) {
+                    newDog.targetCatId = null;
+                    newDog.cooldownTimer = 2; // Wait 2 seconds before targeting again
+                    return newDog;
                 }
 
-                // Not at waypoint or not dwelling
-                return npc;
-            })
-        );
+                // Calculate distance to target cat
+                const distance = calculateDistance(newDog.position, targetCat.position);
+
+                // If close enough, interact with cat
+                if (distance < 2) {
+                    // Begin interaction
+                    newDog.isInteracting = true;
+
+                    // Generate a message
+                    const randomMessage = dogMessages[Math.floor(Math.random() * dogMessages.length)];
+                    newDog.currentMessage = randomMessage;
+                    newDog.messageTimer = 3; // Display message for 3 seconds
+
+                    // Create dog's conversation with cat using AI
+                    handleDogCatInteraction(targetCat.id, randomMessage);
+
+                    // Set cooldown after interaction
+                    newDog.cooldownTimer = 10; // Wait 10 seconds before interacting again
+                    newDog.targetCatId = null; // Clear target
+
+                    return newDog;
+                }
+
+                // Move towards target cat
+                const directionX = targetCat.position.x - newDog.position.x;
+                const directionZ = targetCat.position.z - newDog.position.z;
+
+                // Normalize direction
+                const dirLength = Math.sqrt(directionX * directionX + directionZ * directionZ);
+                const normalizedX = directionX / dirLength;
+                const normalizedZ = directionZ / dirLength;
+
+                // Update position based on speed and time delta
+                newDog.position.x += normalizedX * newDog.speed;
+                newDog.position.z += normalizedZ * newDog.speed;
+
+                // Enforce boundary limits
+                const boundaryLimit = 23; // Same as player
+                newDog.position.x = Math.max(-boundaryLimit, Math.min(boundaryLimit, newDog.position.x));
+                newDog.position.z = Math.max(-boundaryLimit, Math.min(boundaryLimit, newDog.position.z));
+            }
+
+            return newDog;
+        });
     });
 
     return null;
@@ -1306,6 +1522,29 @@ export default function Game() {
         },
     ]);
 
+    // Herding dog state
+    const [dog, setDog] = useState<HerdingDog>({
+        position: { x: 0, z: -5 }, // Start behind player
+        targetCatId: null,
+        isInteracting: false,
+        speed: 0.08, // Slightly faster than cats
+        currentMessage: null,
+        messageTimer: 0,
+        cooldownTimer: 0
+    });
+
+    // Collection of possible dog messages
+    const dogMessages = [
+        "Go to the target! Woof!",
+        "This way, kitty! The target is over there!",
+        "Hey cat! Follow me to the light!",
+        "Woof! Head to the yellow marker!",
+        "Come on, don't be stubborn! Go to the target!",
+        "The light pole is waiting for you!",
+        "That's where you need to go! Trust me!",
+        "I'm herding you for your own good!"
+    ];
+
     // Initialize NPCs with waypoints
     useEffect(() => {
         setNpcs(currentNpcs =>
@@ -1340,9 +1579,6 @@ export default function Game() {
             const distance = calculateDistance(npc.position, targetWaypoint.position);
             const atTargetPosition = distance <= targetWaypoint.radius + 1.0;
 
-            // Debug logging
-            console.log(`NPC ${npc.id}: convinced=${npc.isConvinced}, distance=${distance.toFixed(2)}, radius=${targetWaypoint.radius}, at target=${atTargetPosition}`);
-
             return npc.isConvinced && atTargetPosition;
         });
 
@@ -1353,6 +1589,140 @@ export default function Game() {
             setGameWon(true);
         }
     }, [npcs, waypoints, gameWon, gameStartTime]);
+
+    // Handle dog-cat interactions
+    const handleDogCatInteraction = async (catId: number, message: string) => {
+        // Find the target cat and waypoint
+        const cat = npcs.find(n => n.id === catId);
+        const targetWaypoint = waypoints.find(w => w.isTarget);
+
+        if (!cat || !targetWaypoint) return;
+
+        // Add dog message to cat's conversation history
+        setNpcs(currentNpcs =>
+            currentNpcs.map(n =>
+                n.id === catId
+                    ? {
+                        ...n,
+                        conversationHistory: [...n.conversationHistory, { role: 'user', content: `[Dog]: ${message}` }],
+                        isTyping: true,
+                        responseComplete: false,
+                        readTimeRemaining: 0
+                    }
+                    : n
+            )
+        );
+
+        // Prepare cat state for the AI (similar to player interaction)
+        const catState = {
+            id: cat.id,
+            personality: cat.personality,
+            currentPosition: cat.position,
+            targetWaypoint: cat.targetWaypoint,
+            conversationHistory: cat.conversationHistory
+        };
+
+        try {
+            // Call the AI function (same as player interaction)
+            const { object, conversationHistory } = await processNPCInteraction(
+                message,
+                catState,
+                waypoints,
+                targetWaypoint.id
+            );
+
+            // Stream the response (similar to player interaction)
+            for await (const partialObject of readStreamableValue(object)) {
+                setNpcs(currentNpcs =>
+                    currentNpcs.map(n =>
+                        n.id === catId
+                            ? {
+                                ...n,
+                                aiResponse: partialObject,
+                                isTyping: !partialObject?.result?.message,
+                                readTimeRemaining: partialObject?.result?.message
+                                    ? calculateReadTime(partialObject.result.message)
+                                    : 0,
+                                responseComplete: !!partialObject?.result?.message
+                            }
+                            : n
+                    )
+                );
+            }
+
+            // When streaming is complete, apply any target changes
+            setNpcs(currentNpcs =>
+                currentNpcs.map(n => {
+                    if (n.id !== catId) return n;
+
+                    const newTarget = n.aiResponse?.result?.newTarget;
+                    const targetWaypointId = waypoints.find(w => w.isTarget)?.id;
+
+                    // Check if cat is convinced
+                    const isNowConvinced = typeof newTarget === 'number' && newTarget === targetWaypointId;
+
+                    // Add the AI response to conversation history
+                    const updatedHistory = [
+                        ...conversationHistory,
+                        {
+                            role: 'assistant' as const,
+                            content: n.aiResponse?.result?.message || "I'm not sure how to respond to that."
+                        }
+                    ];
+
+                    // Complete the cat interaction
+                    setTimeout(() => {
+                        setDog(currentDog => ({
+                            ...currentDog,
+                            isInteracting: false
+                        }));
+                    }, 3000); // End dog interaction after 3 seconds
+
+                    return {
+                        ...n,
+                        targetWaypoint: typeof newTarget === 'number' ? newTarget : n.targetWaypoint,
+                        conversationHistory: updatedHistory,
+                        isTyping: false,
+                        responseComplete: true,
+                        readTimeRemaining: calculateReadTime(n.aiResponse?.result?.message || ''),
+                        convincedThroughDialogue: isNowConvinced,
+                    };
+                })
+            );
+
+        } catch (error) {
+            console.error("Error in dog-cat interaction:", error);
+
+            // Handle error case
+            setNpcs(currentNpcs =>
+                currentNpcs.map(n =>
+                    n.id === catId
+                        ? {
+                            ...n,
+                            conversationHistory: [
+                                ...n.conversationHistory,
+                                {
+                                    role: 'assistant' as const,
+                                    content: "Meow? (The cat looks confused by the dog)"
+                                }
+                            ],
+                            isTyping: false,
+                            responseComplete: true,
+                            readTimeRemaining: 2
+                        }
+                        : n
+                )
+            );
+
+            // End dog interaction
+            setTimeout(() => {
+                setDog(currentDog => ({
+                    ...currentDog,
+                    isInteracting: false
+                }));
+            }, 2000);
+        }
+    };
 
     // Handle NPC interaction
     const handleNpcInteraction = (npcId: number) => {
@@ -1549,6 +1919,17 @@ export default function Game() {
 
         // Reset player position
         setPlayerPosition({ x: 0, z: 0 });
+
+        // Reset dog position and state
+        setDog({
+            position: { x: 0, z: -5 },
+            targetCatId: null,
+            isInteracting: false,
+            speed: 0.08,
+            currentMessage: null,
+            messageTimer: 0,
+            cooldownTimer: 0
+        });
     };
 
     // Circle of influence radius
@@ -1573,6 +1954,18 @@ export default function Game() {
 
                 {/* Game state manager */}
                 <GameManager npcs={npcs} setNpcs={setNpcs} waypoints={waypoints} />
+
+                {/* Dog manager */}
+                <DogManager
+                    dog={dog}
+                    setDog={setDog}
+                    npcs={npcs}
+                    setNpcs={setNpcs}
+                    waypoints={waypoints}
+                    gameWon={gameWon}
+                    dogMessages={dogMessages}
+                    handleDogCatInteraction={handleDogCatInteraction}
+                />
 
                 {/* Camera */}
                 <CameraController playerPosition={playerPosition} />
@@ -1614,6 +2007,14 @@ export default function Game() {
                         waypoint={waypoint}
                     />
                 ))}
+
+                {/* Dog */}
+                <Dog
+                    position={dog.position}
+                    targetCat={dog.targetCatId !== null ? npcs.find(n => n.id === dog.targetCatId) || null : null}
+                    isInteracting={dog.isInteracting}
+                    currentMessage={dog.currentMessage}
+                />
 
                 {/* Controls for development/debugging */}
                 <OrbitControls enabled={false} />
