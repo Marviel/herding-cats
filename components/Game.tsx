@@ -13,9 +13,11 @@ import { processNPCInteraction } from '@/app/actions';
 import {
   Html,
   OrbitControls,
+  useTexture,
 } from '@react-three/drei';
 import {
   Canvas,
+  ThreeEvent,
   useFrame,
   useThree,
 } from '@react-three/fiber';
@@ -82,12 +84,18 @@ function Player({
     position,
     setPosition,
     disabled,
-    influenceRadius = 8 // Default radius for the circle of influence
+    influenceRadius = 8, // Default radius for the circle of influence
+    waypoints,
+    destination,
+    setPlayerDestination
 }: {
     position: Position;
     setPosition: (pos: Position) => void;
     disabled: boolean;
     influenceRadius?: number;
+    waypoints: Waypoint[]; // Add waypoints prop to find light sources
+    destination: Position | null; // New prop for click-to-move destination
+    setPlayerDestination: React.Dispatch<React.SetStateAction<Position | null>>;
 }) {
     const groupRef = useRef<THREE.Group>(null);
     const [keys, setKeys] = useState({
@@ -100,6 +108,12 @@ function Player({
     const [isWalking, setIsWalking] = useState(false);
     const [walkingAnim, setWalkingAnim] = useState(0);
     const lastPositionRef = useRef<Position>({ ...position });
+
+    // Points for the line from head to light
+    const [points, setPoints] = useState<THREE.Vector3[]>([
+        new THREE.Vector3(position.x, 1.1, position.z),
+        new THREE.Vector3(0, 0, 0) // Will be updated with light position
+    ]);
 
     const speed = 0.1;
     // Define boundary limits (slightly inside the fence)
@@ -133,7 +147,44 @@ function Player({
         };
     }, [disabled]);
 
-    // Handle movement
+    // Find nearest light source
+    const getNearestLightPosition = (): THREE.Vector3 | null => {
+        // Filter waypoints to get only lightpoles
+        const lightpoles = waypoints.filter(wp => wp.type === 'lightpole');
+        if (lightpoles.length === 0) return null;
+
+        // Find the nearest one
+        let nearestLightpole = lightpoles[0];
+        let minDistance = calculateDistance(position, nearestLightpole.position);
+
+        lightpoles.forEach(lightpole => {
+            const distance = calculateDistance(position, lightpole.position);
+            if (distance < minDistance) {
+                minDistance = distance;
+                nearestLightpole = lightpole;
+            }
+        });
+
+        // Return the position as Vector3 with light height
+        return new THREE.Vector3(
+            nearestLightpole.position.x,
+            2.7, // Light height
+            nearestLightpole.position.z
+        );
+    };
+
+    // Update line points when position changes
+    useEffect(() => {
+        const lightPos = getNearestLightPosition();
+        if (lightPos) {
+            setPoints([
+                new THREE.Vector3(position.x, 1.1, position.z), // Head position
+                lightPos
+            ]);
+        }
+    }, [position.x, position.z]);
+
+    // Handle movement and update light line
     useFrame((_, delta) => {
         if (!groupRef.current) return;
 
@@ -141,10 +192,50 @@ function Player({
         let isMoving = false;
         let moveX = 0, moveZ = 0;
 
+        // Check if any keyboard keys are pressed for movement
+        const isKeyboardMoving = keys.forward || keys.backward || keys.left || keys.right;
+
+        // Handle keyboard movement
         if (keys.forward) { newPos.z -= speed; moveZ -= 1; isMoving = true; }
         if (keys.backward) { newPos.z += speed; moveZ += 1; isMoving = true; }
         if (keys.left) { newPos.x -= speed; moveX -= 1; isMoving = true; }
         if (keys.right) { newPos.x += speed; moveX += 1; isMoving = true; }
+
+        // If using keyboard movement, clear the destination
+        if (isKeyboardMoving && destination) {
+            setPlayerDestination(null);
+        }
+
+        // Handle click-to-move if there's a destination and not keyboard movement
+        if (destination && !isMoving) {
+            const distanceToDestination = calculateDistance(position, destination);
+
+            // Only move if we're not already at the destination
+            if (distanceToDestination > 0.1) {
+                // Calculate direction to destination
+                const directionX = destination.x - position.x;
+                const directionZ = destination.z - position.z;
+
+                // Normalize direction
+                const length = Math.sqrt(directionX * directionX + directionZ * directionZ);
+                const normalizedX = directionX / length;
+                const normalizedZ = directionZ / length;
+
+                // Calculate movement (clamped to speed)
+                const moveAmount = Math.min(speed, distanceToDestination);
+                newPos.x += normalizedX * moveAmount;
+                newPos.z += normalizedZ * moveAmount;
+
+                // Calculate rotation to face movement direction
+                const targetRotation = Math.atan2(normalizedX, normalizedZ);
+                setRotation(targetRotation);
+
+                isMoving = true;
+            } else {
+                // We've reached the destination, clear it
+                setPlayerDestination(null);
+            }
+        }
 
         // Enforce boundary limits
         newPos.x = Math.max(-boundaryLimit, Math.min(boundaryLimit, newPos.x));
@@ -156,7 +247,7 @@ function Player({
             // Increment walking animation counter (for leg/arm movement)
             setWalkingAnim((prev) => (prev + delta * 10) % (Math.PI * 2));
 
-            // Calculate rotation based on movement direction
+            // Calculate rotation based on movement direction for keyboard movement
             if (moveX !== 0 || moveZ !== 0) {
                 const targetRotation = Math.atan2(moveX, moveZ);
                 setRotation(targetRotation);
@@ -169,6 +260,14 @@ function Player({
         // Update group position (whole character)
         groupRef.current.position.x = newPos.x;
         groupRef.current.position.z = newPos.z;
+
+        // Update the line points in real-time
+        const lightPos = getNearestLightPosition();
+        if (lightPos) {
+            // Direct update during frame without setState to avoid render loop
+            points[0].set(newPos.x, 1.1, newPos.z);
+            points[1].copy(lightPos);
+        }
     });
 
     // Calculate limb animations
@@ -242,6 +341,14 @@ function Player({
                     </mesh>
                 </group>
             </group>
+
+            {/* Line to light source */}
+            <line>
+                <bufferGeometry>
+                    <float32BufferAttribute attach="attributes-position" args={[new Float32Array(points.flatMap(p => [p.x, p.y, p.z])), 3]} />
+                </bufferGeometry>
+                <lineBasicMaterial color="red" />
+            </line>
 
             {/* Circle of influence */}
             <mesh rotation={[-Math.PI / 2, 0, 0]} position={[position.x, 0.05, position.z]}>
@@ -818,16 +925,39 @@ function Waypoint({ waypoint }: { waypoint: Waypoint }) {
 }
 
 // Ground component
-function Ground({ onClick }: { onClick?: () => void }) {
+function Ground({ onClick }: { onClick?: (position: Position | null) => void }) {
+    // Load grass texture
+    const grassTexture = useTexture('/textures/grass.jpg');
+
+    // Configure texture to be tileable
+    grassTexture.wrapS = grassTexture.wrapT = THREE.RepeatWrapping;
+    grassTexture.repeat.set(20, 20); // Increased tiling for more natural look
+    grassTexture.colorSpace = THREE.SRGBColorSpace;
+
+    const handleClick = (event: ThreeEvent<MouseEvent>) => {
+        if (onClick && event.point) {
+            // Pass the clicked position to the parent component
+            onClick({
+                x: event.point.x,
+                z: event.point.z
+            });
+        }
+    };
+
     return (
         <mesh
             rotation={[-Math.PI / 2, 0, 0]}
             position={[0, 0, 0]}
             receiveShadow
-            onClick={onClick}
+            onClick={handleClick}
         >
             <planeGeometry args={[50, 50]} />
-            <meshStandardMaterial color="#336633" />
+            <meshStandardMaterial
+                map={grassTexture}
+                roughness={0.9}
+                metalness={0.1}
+                color="#9db552" // Slight tint to adjust grass color
+            />
         </mesh>
     );
 }
@@ -1113,6 +1243,7 @@ function GameManager({
 // Main game component
 export default function Game() {
     const [playerPosition, setPlayerPosition] = useState<Position>({ x: 0, z: 0 });
+    const [playerDestination, setPlayerDestination] = useState<Position | null>(null);
 
     // Track game state
     const [gameStartTime, setGameStartTime] = useState<number>(Date.now());
@@ -1370,8 +1501,12 @@ export default function Game() {
         }
     };
 
-    // Clear all interactions when clicking the ground
-    const handleGroundClick = () => {
+    // Clear all interactions when clicking the ground and set player destination
+    const handleGroundClick = (clickPosition: Position | null) => {
+        // Set the player destination
+        setPlayerDestination(clickPosition);
+
+        // Also handle closing NPC interactions
         setNpcs(currentNpcs =>
             currentNpcs.map(npc => {
                 // Only close if not typing and not in read time
@@ -1454,6 +1589,9 @@ export default function Game() {
                     setPosition={setPlayerPosition}
                     disabled={npcs.some(npc => npc.isInteracting)}
                     influenceRadius={influenceRadius}
+                    waypoints={waypoints}
+                    destination={playerDestination}
+                    setPlayerDestination={setPlayerDestination}
                 />
 
                 {/* NPCs */}
