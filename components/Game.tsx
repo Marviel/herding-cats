@@ -89,15 +89,21 @@ function Player({
     disabled: boolean;
     influenceRadius?: number;
 }) {
-    const meshRef = useRef<THREE.Mesh>(null);
+    const groupRef = useRef<THREE.Group>(null);
     const [keys, setKeys] = useState({
         forward: false,
         backward: false,
         left: false,
         right: false,
     });
+    const [rotation, setRotation] = useState(0);
+    const [isWalking, setIsWalking] = useState(false);
+    const [walkingAnim, setWalkingAnim] = useState(0);
+    const lastPositionRef = useRef<Position>({ ...position });
 
     const speed = 0.1;
+    // Define boundary limits (slightly inside the fence)
+    const boundaryLimit = 23; // Half of the fence size (48/2) minus a small buffer
 
     // Handle keyboard input
     useEffect(() => {
@@ -128,29 +134,114 @@ function Player({
     }, [disabled]);
 
     // Handle movement
-    useFrame(() => {
-        if (!meshRef.current) return;
+    useFrame((_, delta) => {
+        if (!groupRef.current) return;
 
         let newPos = { ...position };
+        let isMoving = false;
+        let moveX = 0, moveZ = 0;
 
-        if (keys.forward) newPos.z -= speed;
-        if (keys.backward) newPos.z += speed;
-        if (keys.left) newPos.x -= speed;
-        if (keys.right) newPos.x += speed;
+        if (keys.forward) { newPos.z -= speed; moveZ -= 1; isMoving = true; }
+        if (keys.backward) { newPos.z += speed; moveZ += 1; isMoving = true; }
+        if (keys.left) { newPos.x -= speed; moveX -= 1; isMoving = true; }
+        if (keys.right) { newPos.x += speed; moveX += 1; isMoving = true; }
+
+        // Enforce boundary limits
+        newPos.x = Math.max(-boundaryLimit, Math.min(boundaryLimit, newPos.x));
+        newPos.z = Math.max(-boundaryLimit, Math.min(boundaryLimit, newPos.z));
+
+        // Update walking animation
+        setIsWalking(isMoving);
+        if (isMoving) {
+            // Increment walking animation counter (for leg/arm movement)
+            setWalkingAnim((prev) => (prev + delta * 10) % (Math.PI * 2));
+
+            // Calculate rotation based on movement direction
+            if (moveX !== 0 || moveZ !== 0) {
+                const targetRotation = Math.atan2(moveX, moveZ);
+                setRotation(targetRotation);
+            }
+        }
 
         // Apply the new position
         setPosition(newPos);
 
-        meshRef.current.position.x = newPos.x;
-        meshRef.current.position.z = newPos.z;
+        // Update group position (whole character)
+        groupRef.current.position.x = newPos.x;
+        groupRef.current.position.z = newPos.z;
     });
+
+    // Calculate limb animations
+    const leftLegRotation = isWalking ? Math.sin(walkingAnim) * 0.4 : 0;
+    const rightLegRotation = isWalking ? -Math.sin(walkingAnim) * 0.4 : 0;
+    const leftArmRotation = isWalking ? -Math.sin(walkingAnim) * 0.4 : 0;
+    const rightArmRotation = isWalking ? Math.sin(walkingAnim) * 0.4 : 0;
+    const bodyBobHeight = isWalking ? Math.abs(Math.sin(walkingAnim)) * 0.05 : 0;
 
     return (
         <>
-            <mesh ref={meshRef} position={[position.x, 0.5, position.z]}>
-                <boxGeometry args={[1, 1, 1]} />
-                <meshStandardMaterial color="green" />
-            </mesh>
+            {/* Main character group */}
+            <group
+                ref={groupRef}
+                position={[position.x, 0.5 + bodyBobHeight, position.z]}
+                rotation={[0, rotation + Math.PI, 0]}
+            >
+                {/* Head */}
+                <mesh position={[0, 0.6, 0]} castShadow>
+                    <boxGeometry args={[0.5, 0.5, 0.5]} />
+                    <meshStandardMaterial color="#f9c49a" />
+
+                    {/* Eyes */}
+                    <mesh position={[0.13, 0.05, -0.26]} castShadow>
+                        <boxGeometry args={[0.1, 0.1, 0.02]} />
+                        <meshStandardMaterial color="#3a3a3c" />
+                    </mesh>
+                    <mesh position={[-0.13, 0.05, -0.26]} castShadow>
+                        <boxGeometry args={[0.1, 0.1, 0.02]} />
+                        <meshStandardMaterial color="#3a3a3c" />
+                    </mesh>
+
+                    {/* Mouth */}
+                    <mesh position={[0, -0.1, -0.26]} castShadow>
+                        <boxGeometry args={[0.2, 0.05, 0.02]} />
+                        <meshStandardMaterial color="#5c3c2e" />
+                    </mesh>
+                </mesh>
+
+                {/* Body */}
+                <mesh position={[0, 0, 0]} castShadow>
+                    <boxGeometry args={[0.5, 0.7, 0.3]} />
+                    <meshStandardMaterial color="#41a33e" />
+                </mesh>
+
+                {/* Arms */}
+                <group position={[0.3, 0.2, 0]} rotation={[leftArmRotation, 0, 0]}>
+                    <mesh position={[0, -0.2, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.6, 0.15]} />
+                        <meshStandardMaterial color="#41a33e" />
+                    </mesh>
+                </group>
+                <group position={[-0.3, 0.2, 0]} rotation={[rightArmRotation, 0, 0]}>
+                    <mesh position={[0, -0.2, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.6, 0.15]} />
+                        <meshStandardMaterial color="#41a33e" />
+                    </mesh>
+                </group>
+
+                {/* Legs */}
+                <group position={[0.15, -0.4, 0]} rotation={[leftLegRotation, 0, 0]}>
+                    <mesh position={[0, -0.3, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.6, 0.15]} />
+                        <meshStandardMaterial color="#1560bd" />
+                    </mesh>
+                </group>
+                <group position={[-0.15, -0.4, 0]} rotation={[rightLegRotation, 0, 0]}>
+                    <mesh position={[0, -0.3, 0]} castShadow>
+                        <boxGeometry args={[0.15, 0.6, 0.15]} />
+                        <meshStandardMaterial color="#1560bd" />
+                    </mesh>
+                </group>
+            </group>
 
             {/* Circle of influence */}
             <mesh rotation={[-Math.PI / 2, 0, 0]} position={[position.x, 0.05, position.z]}>
@@ -417,7 +508,7 @@ function NPC({
             {/* Interaction UI */}
             {npc.isInteracting && (
                 <Html
-                    position={[npc.position.x, 0, npc.position.z]}
+                    position={[npc.position.x, dialogueYPosition, npc.position.z]}
                     center
                     style={{
                         transformOrigin: isCatAbovePlayer ? 'top center' : 'bottom center',
@@ -562,6 +653,16 @@ function Waypoint({ waypoint }: { waypoint: Waypoint }) {
                             emissiveIntensity={0.5}
                         />
                     </mesh>
+                    {/* Add actual light source */}
+                    <pointLight
+                        position={[0, 2.7, 0]}
+                        color="#ffffaa"
+                        intensity={10.0}
+                        distance={40}
+                        castShadow
+                        shadow-mapSize-width={512}
+                        shadow-mapSize-height={512}
+                    />
                 </group>
             )}
 
@@ -728,6 +829,89 @@ function Ground({ onClick }: { onClick?: () => void }) {
             <planeGeometry args={[50, 50]} />
             <meshStandardMaterial color="#336633" />
         </mesh>
+    );
+}
+
+// Fence component
+function Fence() {
+    // Define the boundaries
+    const size = 48; // Slightly smaller than the ground (which is 50x50)
+    const halfSize = size / 2;
+    const postHeight = 2;
+    const postSpacing = 4;
+    const numPosts = Math.floor(size / postSpacing) + 1;
+
+    // Create posts and rails along the perimeter
+    const fencePosts = [];
+    const fenceRails = [];
+
+    // Helper function to create a post
+    const createPost = (x: number, z: number, index: number) => {
+        return (
+            <mesh key={`post-${index}`} position={[x, postHeight / 2, z]} castShadow>
+                <boxGeometry args={[0.3, postHeight, 0.3]} />
+                <meshStandardMaterial color="#8B4513" />
+            </mesh>
+        );
+    };
+
+    // Helper function to create a rail
+    const createRail = (x1: number, z1: number, x2: number, z2: number, index: number) => {
+        // Calculate midpoint and distance
+        const midX = (x1 + x2) / 2;
+        const midZ = (z1 + z2) / 2;
+        const length = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(z2 - z1, 2));
+
+        // Calculate rotation
+        const angle = Math.atan2(z2 - z1, x2 - x1);
+
+        return (
+            <mesh key={`rail-${index}`} position={[midX, postHeight - 0.3, midZ]} rotation={[0, angle, 0]} castShadow>
+                <boxGeometry args={[length, 0.2, 0.1]} />
+                <meshStandardMaterial color="#8B4513" />
+            </mesh>
+        );
+    };
+
+    // Generate posts and rails along each side
+    let postIndex = 0;
+    let railIndex = 0;
+
+    // Create north and south fences
+    for (let i = 0; i < numPosts; i++) {
+        const x = -halfSize + i * postSpacing;
+
+        // North fence
+        fencePosts.push(createPost(x, -halfSize, postIndex++));
+        if (i < numPosts - 1) {
+            fenceRails.push(createRail(x, -halfSize, x + postSpacing, -halfSize, railIndex++));
+        }
+
+        // South fence
+        fencePosts.push(createPost(x, halfSize, postIndex++));
+        if (i < numPosts - 1) {
+            fenceRails.push(createRail(x, halfSize, x + postSpacing, halfSize, railIndex++));
+        }
+    }
+
+    // Create east and west fences
+    for (let i = 1; i < numPosts - 1; i++) { // Skip corners to avoid duplicates
+        const z = -halfSize + i * postSpacing;
+
+        // East fence
+        fencePosts.push(createPost(-halfSize, z, postIndex++));
+        fenceRails.push(createRail(-halfSize, z, -halfSize, z + postSpacing, railIndex++));
+
+        // West fence
+        fencePosts.push(createPost(halfSize, z, postIndex++));
+        fenceRails.push(createRail(halfSize, z, halfSize, z + postSpacing, railIndex++));
+    }
+
+    return (
+        <group>
+            {fencePosts}
+            {fenceRails}
+        </group>
     );
 }
 
@@ -1243,14 +1427,14 @@ export default function Game() {
                 style={{ height: '80vh', width: '100%' }}
             >
                 {/* Lighting */}
-                <ambientLight intensity={0.5} />
-                <directionalLight
-                    position={[10, 10, 5]}
+                <ambientLight intensity={1.5} />
+                {/* <directionalLight
+                    position={[100, 100, 100]}
                     intensity={1}
                     castShadow
                     shadow-mapSize-width={2048}
                     shadow-mapSize-height={2048}
-                />
+                /> */}
 
                 {/* Game state manager */}
                 <GameManager npcs={npcs} setNpcs={setNpcs} waypoints={waypoints} />
@@ -1260,6 +1444,9 @@ export default function Game() {
 
                 {/* Environment */}
                 <Ground onClick={handleGroundClick} />
+
+                {/* Fence */}
+                <Fence />
 
                 {/* Player */}
                 <Player
