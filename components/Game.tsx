@@ -59,11 +59,19 @@ interface NPC {
     isConvinced: boolean;
     convincedTimer: number;
     snarkyComment: string | null;
+    readTimeRemaining: number; // Time player has to read response
+    responseComplete: boolean; // Whether response is complete and in read time
 }
 
 // Helper functions
 const calculateDistance = (pos1: Position, pos2: Position): number => {
     return Math.sqrt(Math.pow(pos2.x - pos1.x, 2) + Math.pow(pos2.z - pos1.z, 2));
+};
+
+// Calculate read time based on message length (250ms per word)
+const calculateReadTime = (message: string): number => {
+    const wordCount = message.split(/\s+/).length;
+    return Math.max(3, wordCount * 0.25); // Minimum 3 seconds, 250ms per word
 };
 
 // Player character component
@@ -154,6 +162,18 @@ function NPC({
 }) {
     const meshRef = useRef<THREE.Mesh>(null);
     const [message, setMessage] = useState('');
+    const conversationContainerRef = useRef<HTMLDivElement>(null);
+
+    // Scroll to bottom of conversation when new messages appear
+    useEffect(() => {
+        if (conversationContainerRef.current) {
+            // Force scroll to bottom of the conversation container
+            const container = conversationContainerRef.current;
+            setTimeout(() => {
+                container.scrollTop = container.scrollHeight;
+            }, 50); // Small delay to ensure content is rendered
+        }
+    }, [npc.conversationHistory, npc.aiResponse?.result?.message, npc.isTyping]);
 
     // Handle NPC movement
     useFrame((_, delta) => {
@@ -208,11 +228,30 @@ function NPC({
     // Handle sending a message
     const handleSendMessage = (e: React.FormEvent) => {
         e.preventDefault();
+        e.stopPropagation();
         if (message.trim()) {
             onSendMessage(npc.id, message);
             setMessage('');
         }
     };
+
+    // Handle text input click
+    const handleInputClick = (e: React.MouseEvent) => {
+        e.stopPropagation();
+    };
+
+    // Handle dialogue click to prevent closing
+    const handleDialogueClick = (e: React.MouseEvent) => {
+        e.stopPropagation();
+    };
+
+    // Calculate dialogue top position (fixed distance above NPC's head)
+    const dialogueYPosition = 2.5; // Increased height above NPC
+
+    // Display read time indicator if response is complete
+    const readTimeProgress = npc.readTimeRemaining > 0 && npc.responseComplete
+        ? Math.min(100, (1 - npc.readTimeRemaining / calculateReadTime(npc.aiResponse?.result?.message || '')) * 100)
+        : 0;
 
     return (
         <group>
@@ -231,7 +270,7 @@ function NPC({
 
             {/* Convinced timer display */}
             {npc.isConvinced && (
-                <Html position={[npc.position.x, 2, npc.position.z]} center>
+                <Html position={[npc.position.x, 1.2, npc.position.z]} center>
                     <div className="bg-black bg-opacity-80 text-white p-2 rounded">
                         <p className="text-center font-bold">
                             Staying for: {Math.ceil(npc.convincedTimer)}s
@@ -243,14 +282,36 @@ function NPC({
                 </Html>
             )}
 
-            {/* Existing interaction UI */}
+            {/* Interaction UI */}
             {npc.isInteracting && (
-                <Html position={[npc.position.x, 2, npc.position.z]} center>
-                    <div className="bg-black bg-opacity-80 text-white p-3 rounded w-96 max-h-96 overflow-y-auto">
+                <Html
+                    position={[npc.position.x, 0, npc.position.z]}
+                    center
+                    // distanceFactor={0.5} // Increased size
+                    style={{
+                        transformOrigin: 'bottom center',
+                        pointerEvents: 'auto'
+                    }}
+                >
+                    <div
+                        className="bg-black bg-opacity-80 text-white p-3 rounded w-96 flex flex-col"
+                        style={{
+                            position: 'absolute',
+                            bottom: '80px', // Increased distance from anchor point
+                            transform: 'translateX(-50%)', // Center horizontally
+                            // maxHeight: '400px',
+                            // minHeight: '200px' // Ensure minimum height
+                        }}
+                        onClick={handleDialogueClick}
+                    >
                         <p className="text-center font-bold mb-2">Talking to NPC {npc.id}</p>
 
                         {/* Display conversation history */}
-                        <div className="mb-3 max-h-40 overflow-y-auto">
+                        <div
+                            ref={conversationContainerRef}
+                            className="mb-3 overflow-y-auto flex-grow"
+                            style={{ maxHeight: '200px', scrollBehavior: 'smooth' }}
+                        >
                             {npc.conversationHistory.map((msg, idx) => (
                                 <div key={idx} className={`mb-2 ${msg.role === 'user' ? 'text-green-400' : 'text-blue-400'}`}>
                                     <span className="font-bold">{msg.role === 'user' ? 'You' : 'NPC'}:</span> {msg.content}
@@ -270,22 +331,32 @@ function NPC({
                                     <span className="font-bold">NPC:</span> <span className="animate-pulse">...</span>
                                 </div>
                             )}
-
-                            {/* Show AI thoughts when debugging */}
-                            {npc.aiResponse?.thinking && process.env.NODE_ENV === 'development' && (
-                                <div className="mt-4 p-2 bg-gray-800 rounded text-xs">
-                                    <p className="font-bold text-gray-400">Thinking:</p>
-                                    <ul className="list-disc pl-4">
-                                        {npc.aiResponse.thinking.map((thought, i) => (
-                                            <li key={i} className="text-gray-400">{thought}</li>
-                                        ))}
-                                    </ul>
-                                </div>
-                            )}
                         </div>
 
+                        {/* Read time indicator */}
+                        {readTimeProgress > 0 && (
+                            <div className="mt-2 bg-gray-700 h-1 w-full rounded">
+                                <div
+                                    className="bg-blue-500 h-1 rounded transition-all duration-300 ease-linear"
+                                    style={{ width: `${readTimeProgress}%` }}
+                                ></div>
+                            </div>
+                        )}
+
+                        {/* Show AI thoughts when debugging */}
+                        {npc.aiResponse?.thinking && process.env.NODE_ENV === 'development' && (
+                            <div className="mt-4 p-2 bg-gray-800 rounded text-xs">
+                                <p className="font-bold text-gray-400">Thinking:</p>
+                                <ul className="list-disc pl-4">
+                                    {npc.aiResponse.thinking.map((thought, i) => (
+                                        <li key={i} className="text-gray-400">{thought}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+
                         {/* Input form */}
-                        <form onSubmit={handleSendMessage} className="flex flex-col gap-2">
+                        <form onSubmit={handleSendMessage} className="flex flex-col gap-2 mt-2">
                             <input
                                 type="text"
                                 value={message}
@@ -293,20 +364,28 @@ function NPC({
                                 placeholder="Type your message..."
                                 className="p-2 rounded bg-gray-800 text-white w-full"
                                 autoFocus
-                                disabled={npc.isTyping}
+                                disabled={npc.isTyping || npc.readTimeRemaining > 0}
+                                onClick={handleInputClick}
                             />
                             <div className="flex justify-between">
                                 <button
                                     type="submit"
-                                    className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded ${npc.isTyping ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                    disabled={npc.isTyping}
+                                    className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded ${(npc.isTyping || npc.readTimeRemaining > 0) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    disabled={npc.isTyping || npc.readTimeRemaining > 0}
+                                    onClick={(e) => e.stopPropagation()}
                                 >
                                     Send
                                 </button>
                                 <button
                                     type="button"
                                     className="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded"
-                                    onClick={() => onInteract(npc.id)}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (!npc.isTyping && (!npc.responseComplete || npc.readTimeRemaining <= 0)) {
+                                            onInteract(npc.id);
+                                        }
+                                    }}
+                                    disabled={npc.isTyping || (npc.responseComplete && npc.readTimeRemaining > 0)}
                                 >
                                     Close
                                 </button>
@@ -391,8 +470,16 @@ function GameManager({
     useFrame((_, delta) => {
         setNpcs(currentNpcs =>
             currentNpcs.map(npc => {
-                // Skip updates if interacting
-                if (npc.isInteracting) return npc;
+                // Update read time countdown if response is complete
+                if (npc.isInteracting && npc.responseComplete && npc.readTimeRemaining > 0) {
+                    return {
+                        ...npc,
+                        readTimeRemaining: Math.max(0, npc.readTimeRemaining - delta)
+                    };
+                }
+
+                // Skip updates if interacting and not in read time
+                if (npc.isInteracting && !npc.responseComplete) return npc;
 
                 // Handle convinced state
                 if (npc.isConvinced) {
@@ -533,7 +620,9 @@ export default function Game() {
             isTyping: false,
             isConvinced: false,
             convincedTimer: 0,
-            snarkyComment: null
+            snarkyComment: null,
+            readTimeRemaining: 0,
+            responseComplete: false
         },
         {
             id: 2,
@@ -551,7 +640,9 @@ export default function Game() {
             isTyping: false,
             isConvinced: false,
             convincedTimer: 0,
-            snarkyComment: null
+            snarkyComment: null,
+            readTimeRemaining: 0,
+            responseComplete: false
         },
     ]);
 
@@ -574,14 +665,48 @@ export default function Game() {
         );
     }, [waypoints]);
 
+    // Check for win condition
+    useEffect(() => {
+        // If already won, don't check again
+        if (gameWon) return;
+
+        // Check if all NPCs are at the target waypoint
+        const targetWaypoint = waypoints.find(w => w.isTarget);
+        if (!targetWaypoint) return;
+
+        const allNpcsAtTarget = npcs.every(npc => {
+            // If convinced and at target, count as at target
+            return npc.isConvinced &&
+                calculateDistance(npc.position, targetWaypoint.position) < 1.5;
+        });
+
+        if (allNpcsAtTarget && npcs.length > 0) {
+            // Calculate time taken
+            const timeElapsed = Math.floor((Date.now() - gameStartTime) / 1000);
+            setGameTime(timeElapsed);
+            setGameWon(true);
+        }
+    }, [npcs, waypoints, gameWon, gameStartTime]);
+
     // Handle NPC interaction
     const handleNpcInteraction = (npcId: number) => {
         setNpcs(currentNpcs =>
-            currentNpcs.map(npc =>
-                npc.id === npcId
-                    ? { ...npc, isInteracting: !npc.isInteracting }
-                    : { ...npc, isInteracting: false }
-            )
+            currentNpcs.map(npc => {
+                // If this is the clicked NPC
+                if (npc.id === npcId) {
+                    // If already interacting, toggle off only if allowed (not typing, not in read time)
+                    if (npc.isInteracting) {
+                        if (npc.isTyping || (npc.responseComplete && npc.readTimeRemaining > 0)) {
+                            return npc; // Don't allow closing yet
+                        }
+                        return { ...npc, isInteracting: false, responseComplete: false };
+                    }
+                    // Otherwise, toggle on and disable other NPCs
+                    return { ...npc, isInteracting: true };
+                }
+                // Always turn off other NPCs
+                return { ...npc, isInteracting: false };
+            })
         );
     };
 
@@ -600,7 +725,9 @@ export default function Game() {
                     ? {
                         ...n,
                         conversationHistory: [...n.conversationHistory, { role: 'user', content: message }],
-                        isTyping: true
+                        isTyping: true,
+                        responseComplete: false,
+                        readTimeRemaining: 0
                     }
                     : n
             )
@@ -629,7 +756,16 @@ export default function Game() {
                 setNpcs(currentNpcs =>
                     currentNpcs.map(n =>
                         n.id === npcId
-                            ? { ...n, aiResponse: partialObject, isTyping: !partialObject?.result?.message }
+                            ? {
+                                ...n,
+                                aiResponse: partialObject,
+                                isTyping: !partialObject?.result?.message,
+                                // Set read time when result is available
+                                readTimeRemaining: partialObject?.result?.message
+                                    ? calculateReadTime(partialObject.result.message)
+                                    : 0,
+                                responseComplete: !!partialObject?.result?.message
+                            }
                             : n
                     )
                 );
@@ -640,7 +776,6 @@ export default function Game() {
                 currentNpcs.map(n => {
                     if (n.id !== npcId) return n;
 
-                    // Fix the potential undefined issue with newTarget
                     const newTarget = n.aiResponse?.result?.newTarget;
 
                     // Add the AI response to conversation history
@@ -656,7 +791,9 @@ export default function Game() {
                         ...n,
                         targetWaypoint: typeof newTarget === 'number' ? newTarget : n.targetWaypoint,
                         conversationHistory: updatedHistory,
-                        isTyping: false
+                        isTyping: false,
+                        responseComplete: true,
+                        readTimeRemaining: calculateReadTime(n.aiResponse?.result?.message || '')
                     };
                 })
             );
@@ -673,11 +810,13 @@ export default function Game() {
                             conversationHistory: [
                                 ...n.conversationHistory,
                                 {
-                                    role: 'assistant',
+                                    role: 'assistant' as const,
                                     content: "Sorry, I'm having trouble understanding. Can you try again?"
                                 }
                             ],
-                            isTyping: false
+                            isTyping: false,
+                            responseComplete: true,
+                            readTimeRemaining: 3 // 3 seconds to read error message
                         }
                         : n
                 )
@@ -688,32 +827,15 @@ export default function Game() {
     // Clear all interactions when clicking the ground
     const handleGroundClick = () => {
         setNpcs(currentNpcs =>
-            currentNpcs.map(npc => ({ ...npc, isInteracting: false }))
+            currentNpcs.map(npc => {
+                // Only close if not typing and not in read time
+                if (npc.isInteracting && (npc.isTyping || (npc.responseComplete && npc.readTimeRemaining > 0))) {
+                    return npc; // Don't allow closing yet
+                }
+                return { ...npc, isInteracting: false, responseComplete: false };
+            })
         );
     };
-
-    // Check for win condition
-    useEffect(() => {
-        // If already won, don't check again
-        if (gameWon) return;
-
-        // Check if all NPCs are at the target waypoint
-        const targetWaypoint = waypoints.find(w => w.isTarget);
-        if (!targetWaypoint) return;
-
-        const allNpcsAtTarget = npcs.every(npc => {
-            // If convinced and at target, count as at target
-            return npc.isConvinced &&
-                calculateDistance(npc.position, targetWaypoint.position) < 1.5;
-        });
-
-        if (allNpcsAtTarget && npcs.length > 0) {
-            // Calculate time taken
-            const timeElapsed = Math.floor((Date.now() - gameStartTime) / 1000);
-            setGameTime(timeElapsed);
-            setGameWon(true);
-        }
-    }, [npcs, waypoints, gameWon, gameStartTime]);
 
     // Restart the game
     const handleRestart = () => {
@@ -738,7 +860,9 @@ export default function Game() {
             snarkyComment: null,
             conversationHistory: [],
             aiResponse: null,
-            isTyping: false
+            isTyping: false,
+            readTimeRemaining: 0,
+            responseComplete: false
         })));
 
         // Reset player position
@@ -746,8 +870,12 @@ export default function Game() {
     };
 
     return (
-        <div className="w-full h-full">
-            <Canvas shadows className="w-full" style={{ height: '80vh' }}>
+        <div className="w-full h-full relative">
+            <Canvas
+                shadows
+                className="w-full"
+                style={{ height: '80vh', width: '100%' }}
+            >
                 {/* Lighting */}
                 <ambientLight intensity={0.5} />
                 <directionalLight
@@ -798,7 +926,7 @@ export default function Game() {
             </Canvas>
 
             {/* Game Instructions */}
-            <div className="absolute top-4 left-4 bg-black bg-opacity-70 p-3 rounded text-white text-sm">
+            <div className="absolute top-4 right-4 bg-black bg-opacity-70 p-3 rounded text-white text-sm">
                 <p>Move: WASD or Arrow Keys</p>
                 <p>Interact: Click on an NPC</p>
                 <p className="mt-2">Goal: Convince all NPCs to move to the yellow target</p>
