@@ -49,16 +49,11 @@ interface NPC {
     lastWaypoint: number | null;
     personality: string;
     conversationHistory: {
-        role: 'user' | 'assistant';
+        role: 'user' | 'assistant' | 'thinking';
         content: string;
+        collapsed?: boolean;
+        isPartial?: boolean;
     }[];
-    aiResponse: {
-        thinking?: string[];
-        result?: {
-            message: string;
-            newTarget: number | null;
-        };
-    } | null;
     isTyping: boolean;
     isConvinced: boolean;
     convincedTimer: number;
@@ -66,6 +61,7 @@ interface NPC {
     readTimeRemaining: number; // Time player has to read response
     responseComplete: boolean; // Whether response is complete and in read time
     convincedThroughDialogue: boolean; // New property to track if convinced through dialogue
+    pendingTargetWaypoint: number | null; // Store target waypoint from AI until response is complete
 }
 
 // Helper functions
@@ -365,6 +361,7 @@ function NPC({
     waypoints,
     onInteract,
     onSendMessage,
+    onToggleThinkingVisibility,
     playerPosition,
     influenceRadius = 8
 }: {
@@ -372,6 +369,7 @@ function NPC({
     waypoints: Waypoint[];
     onInteract: (id: number) => void;
     onSendMessage: (id: number, message: string) => void;
+    onToggleThinkingVisibility: (id: number) => void;
     playerPosition: Position;
     influenceRadius?: number;
 }) {
@@ -391,7 +389,7 @@ function NPC({
                 container.scrollTop = container.scrollHeight;
             }, 50); // Small delay to ensure content is rendered
         }
-    }, [npc.conversationHistory, npc.aiResponse?.result?.message, npc.isTyping]);
+    }, [npc.conversationHistory, npc.isTyping]);
 
     // Handle NPC movement
     useFrame((_, delta) => {
@@ -509,7 +507,7 @@ function NPC({
 
     // Display read time indicator if response is complete
     const readTimeProgress = npc.readTimeRemaining > 0 && npc.responseComplete
-        ? Math.min(100, (1 - npc.readTimeRemaining / calculateReadTime(npc.aiResponse?.result?.message || '')) * 100)
+        ? Math.min(100, (1 - npc.readTimeRemaining / calculateReadTime(npc.conversationHistory.find(msg => msg.role === 'assistant')?.content || '')) * 100)
         : 0;
 
     // Get base cat color
@@ -526,6 +524,11 @@ function NPC({
 
     // Determine if input should be disabled (when typing or convinced, but NOT during read time)
     const isInputDisabled = npc.isTyping || npc.convincedThroughDialogue;
+
+    // Function to toggle thinking visibility
+    const onToggleThinking = (npcId: number) => {
+        onToggleThinkingVisibility(npcId);
+    };
 
     return (
         <group>
@@ -646,17 +649,16 @@ function NPC({
                             style={{ maxHeight: '200px', scrollBehavior: 'smooth' }}
                         >
                             {npc.conversationHistory.map((msg, idx) => (
-                                <div key={idx} className={`mb-2 ${msg.role === 'user' ? 'text-green-400' : 'text-blue-400'}`}>
-                                    <span className="font-bold">{msg.role === 'user' ? 'You' : 'Cat'}:</span> {msg.content}
-                                </div>
+                                msg.role === 'thinking' ? (
+                                    <div key={idx} className={`mb-2 text-gray-400 ${msg.collapsed ? 'hidden' : ''}`}>
+                                        <span className="font-bold">Thinking:</span> {msg.content}
+                                    </div>
+                                ) : (
+                                    <div key={idx} className={`mb-2 ${msg.role === 'user' ? 'text-green-400' : 'text-blue-400'}`}>
+                                        <span className="font-bold">{msg.role === 'user' ? 'You' : 'Cat'}:</span> {msg.content}
+                                    </div>
+                                )
                             ))}
-
-                            {/* Show AI response if available */}
-                            {npc.aiResponse?.result?.message && (
-                                <div className="mb-2 text-blue-400">
-                                    <span className="font-bold">Cat:</span> {npc.aiResponse.result.message}
-                                </div>
-                            )}
 
                             {/* Show typing indicator */}
                             {npc.isTyping && (
@@ -676,16 +678,19 @@ function NPC({
                             </div>
                         )}
 
-                        {/* Show AI thoughts when debugging */}
-                        {npc.aiResponse?.thinking && process.env.NODE_ENV === 'development' && (
-                            <div className="mt-4 p-2 bg-gray-800 rounded text-xs">
-                                <p className="font-bold text-gray-400">Thinking:</p>
-                                <ul className="list-disc pl-4">
-                                    {npc.aiResponse.thinking.map((thought, i) => (
-                                        <li key={i} className="text-gray-400">{thought}</li>
-                                    ))}
-                                </ul>
-                            </div>
+                        {/* Toggle thinking visibility */}
+                        {npc.conversationHistory.some(msg => msg.role === 'thinking') && (
+                            <button
+                                onClick={(e: React.MouseEvent) => {
+                                    e.stopPropagation();
+                                    onToggleThinking(npc.id);
+                                }}
+                                className="text-xs text-gray-400 underline mt-1 mb-2 hover:text-gray-300"
+                            >
+                                {npc.conversationHistory.find(msg => msg.role === 'thinking' && !msg.collapsed)
+                                    ? 'Hide thinking'
+                                    : 'Show thinking'}
+                            </button>
                         )}
 
                         {/* Show message when convinced */}
@@ -1101,7 +1106,8 @@ function GameManager({
                         isConvinced: false,
                         convincedTimer: 0,
                         snarkyComment: null,
-                        convincedThroughDialogue: false // Also reset this flag
+                        convincedThroughDialogue: false, // Also reset this flag
+                        pendingTargetWaypoint: null
                     };
                 }
 
@@ -1115,7 +1121,8 @@ function GameManager({
                             ...npc,
                             readTimeRemaining: 0,
                             isInteracting: false, // Auto-close the dialogue
-                            responseComplete: false
+                            responseComplete: false,
+                            pendingTargetWaypoint: null
                         };
                     }
 
@@ -1156,9 +1163,12 @@ function GameManager({
                                 ...npc.conversationHistory,
                                 {
                                     role: 'assistant' as const,
-                                    content: randomComment
+                                    content: randomComment,
+                                    collapsed: true,
+                                    isPartial: true
                                 }
-                            ]
+                            ],
+                            pendingTargetWaypoint: null
                         };
                     }
 
@@ -1169,7 +1179,8 @@ function GameManager({
                         // Show a snarky comment when there's 5 seconds left
                         snarkyComment: newTimer <= 5 && !npc.snarkyComment
                             ? "I'm not staying here much longer..."
-                            : npc.snarkyComment
+                            : npc.snarkyComment,
+                        pendingTargetWaypoint: null
                     };
                 }
 
@@ -1189,7 +1200,8 @@ function GameManager({
                                     isConvinced: true,
                                     convincedTimer: 30, // 30 seconds timer
                                     snarkyComment: null,
-                                    dwellTime: 0
+                                    dwellTime: 0,
+                                    pendingTargetWaypoint: null
                                 };
                             }
 
@@ -1218,14 +1230,16 @@ function GameManager({
                                     dwellTime: 0,
                                     currentWaypoint: npc.targetWaypoint,
                                     lastWaypoint: npc.targetWaypoint,
-                                    targetWaypoint: randomWaypoint.id
+                                    targetWaypoint: randomWaypoint.id,
+                                    pendingTargetWaypoint: randomWaypoint.id
                                 };
                             }
 
                             // Still dwelling
                             return {
                                 ...npc,
-                                dwellTime: newDwellTime
+                                dwellTime: newDwellTime,
+                                pendingTargetWaypoint: null
                             };
                         }
                     }
@@ -1274,14 +1288,14 @@ export default function Game() {
             lastWaypoint: null,
             personality: "You're impatient and easily annoyed, but you can be convinced if someone offers a logical reason.",
             conversationHistory: [],
-            aiResponse: null,
             isTyping: false,
             isConvinced: false,
             convincedTimer: 0,
             snarkyComment: null,
             readTimeRemaining: 0,
             responseComplete: false,
-            convincedThroughDialogue: false
+            convincedThroughDialogue: false,
+            pendingTargetWaypoint: null
         },
         {
             id: 2,
@@ -1295,14 +1309,14 @@ export default function Game() {
             lastWaypoint: null,
             personality: "You're curious and easily distracted. You love interesting stories and adventures.",
             conversationHistory: [],
-            aiResponse: null,
             isTyping: false,
             isConvinced: false,
             convincedTimer: 0,
             snarkyComment: null,
             readTimeRemaining: 0,
             responseComplete: false,
-            convincedThroughDialogue: false
+            convincedThroughDialogue: false,
+            pendingTargetWaypoint: null
         },
     ]);
 
@@ -1376,6 +1390,24 @@ export default function Game() {
         );
     };
 
+    // Handle toggling thinking visibility
+    const handleToggleThinking = (npcId: number) => {
+        setNpcs(currentNpcs =>
+            currentNpcs.map(npc =>
+                npc.id === npcId
+                    ? {
+                        ...npc,
+                        conversationHistory: npc.conversationHistory.map(msg =>
+                            msg.role === 'thinking'
+                                ? { ...msg, collapsed: !msg.collapsed }
+                                : msg
+                        )
+                    }
+                    : npc
+            )
+        );
+    };
+
     // Handle messages to NPC
     const handleSendMessage = async (npcId: number, message: string) => {
         // Find the target NPC and waypoint
@@ -1405,7 +1437,9 @@ export default function Game() {
             personality: npc.personality,
             currentPosition: npc.position,
             targetWaypoint: npc.targetWaypoint,
-            conversationHistory: npc.conversationHistory
+            // Only include user and assistant messages for AI processing
+            conversationHistory: npc.conversationHistory.filter(msg => msg.role === 'user' || msg.role === 'assistant')
+                .map(({ role, content }) => ({ role, content } as { role: 'user' | 'assistant', content: string }))
         };
 
         try {
@@ -1420,20 +1454,61 @@ export default function Game() {
             // Stream the response
             for await (const partialObject of readStreamableValue(object)) {
                 setNpcs(currentNpcs =>
-                    currentNpcs.map(n =>
-                        n.id === npcId
-                            ? {
-                                ...n,
-                                aiResponse: partialObject,
-                                isTyping: !partialObject?.result?.message,
-                                // Set read time when result is available
-                                readTimeRemaining: partialObject?.result?.message
-                                    ? calculateReadTime(partialObject.result.message)
-                                    : 0,
-                                responseComplete: !!partialObject?.result?.message
+                    currentNpcs.map(n => {
+                        if (n.id !== npcId) return n;
+
+                        // Create an updated conversation history
+                        let updatedHistory = [...n.conversationHistory];
+
+                        // Add thinking entries if available
+                        if (partialObject?.thinking && partialObject.thinking.length > 0) {
+                            // Remove any previous thinking entries
+                            updatedHistory = updatedHistory.filter(msg => msg.role !== 'thinking');
+
+                            // Add new thinking entries
+                            partialObject.thinking.forEach((thought: string) => {
+                                updatedHistory.push({
+                                    role: 'thinking',
+                                    content: thought,
+                                    collapsed: true
+                                });
+                            });
+                        }
+
+                        // Add or update the assistant's response if available
+                        if (partialObject?.result?.message) {
+                            const assistantMessageIndex = updatedHistory.findIndex(
+                                msg => msg.role === 'assistant' && msg.isPartial
+                            );
+
+                            if (assistantMessageIndex >= 0) {
+                                // Update existing partial message
+                                updatedHistory[assistantMessageIndex] = {
+                                    role: 'assistant',
+                                    content: partialObject.result.message,
+                                    isPartial: true
+                                };
+                            } else {
+                                // Add new message
+                                updatedHistory.push({
+                                    role: 'assistant',
+                                    content: partialObject.result.message,
+                                    isPartial: true
+                                });
                             }
-                            : n
-                    )
+                        }
+
+                        return {
+                            ...n,
+                            conversationHistory: updatedHistory,
+                            isTyping: !partialObject?.result?.message,
+                            readTimeRemaining: partialObject?.result?.message
+                                ? calculateReadTime(partialObject.result.message)
+                                : 0,
+                            responseComplete: !!partialObject?.result?.message,
+                            pendingTargetWaypoint: partialObject?.result?.newTarget || n.pendingTargetWaypoint
+                        };
+                    })
                 );
             }
 
@@ -1442,25 +1517,23 @@ export default function Game() {
                 currentNpcs.map(n => {
                     if (n.id !== npcId) return n;
 
-                    const newTarget = n.aiResponse?.result?.newTarget;
+                    const newTarget = n.pendingTargetWaypoint;
                     const targetWaypointId = waypoints.find(w => w.isTarget)?.id;
 
-                    // Only mark as convinced if the AI EXPLICITLY directed the cat to the target waypoint
+                    // Check if cat is convinced
                     const isNowConvinced = typeof newTarget === 'number' && newTarget === targetWaypointId;
 
-                    // Log for debugging
-                    if (isNowConvinced) {
-                        console.log(`NPC ${n.id} convinced to go to target waypoint ${targetWaypointId}`);
-                    }
+                    // Find the most recent assistant message
+                    const assistantMessage = n.conversationHistory.find(
+                        msg => msg.role === 'assistant' && msg.isPartial
+                    );
 
-                    // Add the AI response to conversation history
-                    const updatedHistory = [
-                        ...conversationHistory,
-                        {
-                            role: 'assistant' as const,
-                            content: n.aiResponse?.result?.message || "I'm not sure how to respond to that."
-                        }
-                    ];
+                    // Create final conversation history
+                    const updatedHistory = n.conversationHistory.map(msg =>
+                        msg.role === 'assistant' && msg.isPartial
+                            ? { ...msg, isPartial: false }
+                            : msg
+                    );
 
                     return {
                         ...n,
@@ -1468,13 +1541,12 @@ export default function Game() {
                         conversationHistory: updatedHistory,
                         isTyping: false,
                         responseComplete: true,
-                        readTimeRemaining: calculateReadTime(n.aiResponse?.result?.message || ''),
-                        // Set the convinced flag ONLY if the AI directed to target waypoint
+                        readTimeRemaining: calculateReadTime(assistantMessage?.content || ''),
                         convincedThroughDialogue: isNowConvinced,
+                        pendingTargetWaypoint: null
                     };
                 })
             );
-
         } catch (error) {
             console.error("Error in AI interaction:", error);
 
@@ -1487,13 +1559,15 @@ export default function Game() {
                             conversationHistory: [
                                 ...n.conversationHistory,
                                 {
-                                    role: 'assistant' as const,
-                                    content: "Sorry, I'm having trouble understanding. Can you try again?"
+                                    role: 'assistant',
+                                    content: "Sorry, I'm having trouble understanding. Can you try again?",
+                                    isPartial: false
                                 }
                             ],
                             isTyping: false,
                             responseComplete: true,
-                            readTimeRemaining: 3 // 3 seconds to read error message
+                            readTimeRemaining: 3, // 3 seconds to read error message
+                            pendingTargetWaypoint: null
                         }
                         : n
                 )
@@ -1540,11 +1614,11 @@ export default function Game() {
             lastWaypoint: null,
             snarkyComment: null,
             conversationHistory: [],
-            aiResponse: null,
             isTyping: false,
             readTimeRemaining: 0,
             responseComplete: false,
-            convincedThroughDialogue: false
+            convincedThroughDialogue: false,
+            pendingTargetWaypoint: null
         })));
 
         // Reset player position
@@ -1602,6 +1676,7 @@ export default function Game() {
                         waypoints={waypoints}
                         onInteract={handleNpcInteraction}
                         onSendMessage={handleSendMessage}
+                        onToggleThinkingVisibility={handleToggleThinking}
                         playerPosition={playerPosition}
                         influenceRadius={influenceRadius}
                     />
