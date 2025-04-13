@@ -31,6 +31,8 @@ interface Waypoint {
     name: string;
     position: Position;
     isTarget: boolean;
+    type: string;
+    radius: number; // How close an NPC can get to this waypoint
 }
 
 interface NPC {
@@ -61,6 +63,7 @@ interface NPC {
     snarkyComment: string | null;
     readTimeRemaining: number; // Time player has to read response
     responseComplete: boolean; // Whether response is complete and in read time
+    convincedThroughDialogue: boolean; // New property to track if convinced through dialogue
 }
 
 // Helper functions
@@ -71,18 +74,20 @@ const calculateDistance = (pos1: Position, pos2: Position): number => {
 // Calculate read time based on message length (250ms per word)
 const calculateReadTime = (message: string): number => {
     const wordCount = message.split(/\s+/).length;
-    return Math.max(3, wordCount * 0.25); // Minimum 3 seconds, 250ms per word
+    return Math.max(2, wordCount * 0.15); // Reduced from 0.25 to 0.15, min from 3 to 2 seconds
 };
 
 // Player character component
 function Player({
     position,
     setPosition,
-    disabled
+    disabled,
+    influenceRadius = 8 // Default radius for the circle of influence
 }: {
     position: Position;
     setPosition: (pos: Position) => void;
     disabled: boolean;
+    influenceRadius?: number;
 }) {
     const meshRef = useRef<THREE.Mesh>(null);
     const [keys, setKeys] = useState({
@@ -141,10 +146,18 @@ function Player({
     });
 
     return (
-        <mesh ref={meshRef} position={[position.x, 0.5, position.z]}>
-            <boxGeometry args={[1, 1, 1]} />
-            <meshStandardMaterial color="green" />
-        </mesh>
+        <>
+            <mesh ref={meshRef} position={[position.x, 0.5, position.z]}>
+                <boxGeometry args={[1, 1, 1]} />
+                <meshStandardMaterial color="green" />
+            </mesh>
+
+            {/* Circle of influence */}
+            <mesh rotation={[-Math.PI / 2, 0, 0]} position={[position.x, 0.05, position.z]}>
+                <circleGeometry args={[influenceRadius, 32]} />
+                <meshStandardMaterial color="#ffff00" transparent opacity={0.15} />
+            </mesh>
+        </>
     );
 }
 
@@ -153,16 +166,23 @@ function NPC({
     npc,
     waypoints,
     onInteract,
-    onSendMessage
+    onSendMessage,
+    playerPosition,
+    influenceRadius = 8
 }: {
     npc: NPC;
     waypoints: Waypoint[];
     onInteract: (id: number) => void;
     onSendMessage: (id: number, message: string) => void;
+    playerPosition: Position;
+    influenceRadius?: number;
 }) {
-    const meshRef = useRef<THREE.Mesh>(null);
+    const groupRef = useRef<THREE.Group>(null);
+    const bodyRef = useRef<THREE.Mesh>(null);
     const [message, setMessage] = useState('');
     const conversationContainerRef = useRef<HTMLDivElement>(null);
+    const [rotation, setRotation] = useState(0);
+    const lastPositionRef = useRef<Position>({ ...npc.position });
 
     // Scroll to bottom of conversation when new messages appear
     useEffect(() => {
@@ -177,7 +197,7 @@ function NPC({
 
     // Handle NPC movement
     useFrame((_, delta) => {
-        if (!meshRef.current || npc.isInteracting) return;
+        if (!groupRef.current || npc.isInteracting) return;
 
         // If we need to choose a waypoint
         if (npc.targetWaypoint === null) {
@@ -190,14 +210,25 @@ function NPC({
 
         const distance = calculateDistance(npc.position, targetWaypoint.position);
 
-        // If very close to waypoint
-        if (distance < 0.5) {
-            // If just arrived, update position to be exactly at waypoint
-            if (distance > 0.1) {
-                npc.position.x = targetWaypoint.position.x;
-                npc.position.z = targetWaypoint.position.z;
-                meshRef.current.position.x = targetWaypoint.position.x;
-                meshRef.current.position.z = targetWaypoint.position.z;
+        // If very close to waypoint (respecting the waypoint's radius)
+        if (distance <= targetWaypoint.radius + 0.5) {
+            // If just arrived, update position to be exactly at the edge of radius
+            if (Math.abs(distance - targetWaypoint.radius) > 0.1) {
+                // Calculate position at the edge of the radius
+                const directionX = targetWaypoint.position.x - npc.position.x;
+                const directionZ = targetWaypoint.position.z - npc.position.z;
+                const dirLength = Math.sqrt(directionX * directionX + directionZ * directionZ);
+
+                // Normalize and position at radius
+                const normalizedX = directionX / dirLength;
+                const normalizedZ = directionZ / dirLength;
+
+                // Position at radius distance from waypoint
+                npc.position.x = targetWaypoint.position.x - (normalizedX * targetWaypoint.radius);
+                npc.position.z = targetWaypoint.position.z - (normalizedZ * targetWaypoint.radius);
+
+                groupRef.current.position.x = npc.position.x;
+                groupRef.current.position.z = npc.position.z;
             }
             return; // Don't move, dwell time is handled in the parent component
         }
@@ -211,18 +242,48 @@ function NPC({
         const normalizedX = directionX / dist;
         const normalizedZ = directionZ / dist;
 
+        // Previous position
+        const prevPos = { ...npc.position };
+
+        // Update position
         npc.position.x += normalizedX * npc.speed;
         npc.position.z += normalizedZ * npc.speed;
 
-        // Update mesh position
-        meshRef.current.position.x = npc.position.x;
-        meshRef.current.position.z = npc.position.z;
+        // If moved enough to calculate direction
+        if (calculateDistance(prevPos, npc.position) > 0.01) {
+            // Calculate rotation based on movement direction
+            const targetRotation = Math.atan2(normalizedX, normalizedZ);
+            // Smooth rotation 
+            setRotation(targetRotation);
+            lastPositionRef.current = { ...npc.position };
+        }
+
+        // Update group position
+        groupRef.current.position.x = npc.position.x;
+        groupRef.current.position.z = npc.position.z;
     });
+
+    // Add state for showing the out-of-range indicator
+    const [showOutOfRangeIndicator, setShowOutOfRangeIndicator] = useState(false);
+
+    // Function to check if NPC is within player's influence radius
+    const isWithinInfluence = (): boolean => {
+        return calculateDistance(npc.position, playerPosition) <= influenceRadius;
+    };
 
     // Handle clicks on the NPC
     const handleClick = (e: any) => {
         e.stopPropagation();
-        onInteract(npc.id);
+
+        // Check if NPC is within player's influence radius
+        if (isWithinInfluence()) {
+            onInteract(npc.id);
+        } else {
+            // Show out-of-range indicator
+            setShowOutOfRangeIndicator(true);
+            // Hide after delay
+            setTimeout(() => setShowOutOfRangeIndicator(false), 2000);
+        }
     };
 
     // Handle sending a message
@@ -253,20 +314,91 @@ function NPC({
         ? Math.min(100, (1 - npc.readTimeRemaining / calculateReadTime(npc.aiResponse?.result?.message || '')) * 100)
         : 0;
 
+    // Get base cat color
+    const catColor = npc.color === "red" ? "#ff6b6b" : "#6b9fff";
+    const catEyeColor = npc.color === "red" ? "#ffcc00" : "#00ccff";
+
+    // Handle emissive effects for state
+    const isEmissive = npc.isInteracting || npc.isConvinced;
+    const emissiveColor = npc.isInteracting ? "white" : "yellow";
+    const emissiveIntensity = npc.isInteracting ? 0.3 : (npc.isConvinced ? 0.2 : 0);
+
+    // Determine if cat is above or below player (in the z-axis)
+    const isCatAbovePlayer = npc.position.z < playerPosition.z;
+
+    // Determine if input should be disabled (when typing or convinced, but NOT during read time)
+    const isInputDisabled = npc.isTyping || npc.convincedThroughDialogue;
+
     return (
         <group>
-            <mesh
-                ref={meshRef}
+            {/* Cat model */}
+            <group
+                ref={groupRef}
                 position={[npc.position.x, 0.5, npc.position.z]}
+                rotation={[0, rotation + Math.PI, 0]}
                 onClick={handleClick}
             >
-                <boxGeometry args={[1, 1, 1]} />
-                <meshStandardMaterial
-                    color={npc.color}
-                    emissive={npc.isInteracting ? "white" : (npc.isConvinced ? "yellow" : "black")}
-                    emissiveIntensity={npc.isInteracting ? 0.5 : (npc.isConvinced ? 0.3 : 0)}
-                />
-            </mesh>
+                {/* Body */}
+                <mesh position={[0, 0, 0]} castShadow ref={bodyRef}>
+                    <boxGeometry args={[0.9, 0.6, 1.2]} />
+                    <meshStandardMaterial
+                        color={catColor}
+                        emissive={emissiveColor}
+                        emissiveIntensity={emissiveIntensity}
+                    />
+                </mesh>
+
+                {/* Head */}
+                <mesh position={[0, 0.3, -0.6]} castShadow>
+                    <boxGeometry args={[0.7, 0.6, 0.6]} />
+                    <meshStandardMaterial
+                        color={catColor}
+                        emissive={emissiveColor}
+                        emissiveIntensity={emissiveIntensity}
+                    />
+                </mesh>
+
+                {/* Ears */}
+                <mesh position={[-0.25, 0.7, -0.6]} rotation={[0, 0, Math.PI / 4]} castShadow>
+                    <boxGeometry args={[0.2, 0.3, 0.1]} />
+                    <meshStandardMaterial color={catColor} />
+                </mesh>
+                <mesh position={[0.25, 0.7, -0.6]} rotation={[0, 0, -Math.PI / 4]} castShadow>
+                    <boxGeometry args={[0.2, 0.3, 0.1]} />
+                    <meshStandardMaterial color={catColor} />
+                </mesh>
+
+                {/* Eyes */}
+                <mesh position={[-0.2, 0.3, -0.91]} castShadow>
+                    <sphereGeometry args={[0.12, 16, 16]} />
+                    <meshStandardMaterial color={catEyeColor} emissive={catEyeColor} emissiveIntensity={0.5} />
+                </mesh>
+                <mesh position={[0.2, 0.3, -0.91]} castShadow>
+                    <sphereGeometry args={[0.12, 16, 16]} />
+                    <meshStandardMaterial color={catEyeColor} emissive={catEyeColor} emissiveIntensity={0.5} />
+                </mesh>
+
+                {/* Nose */}
+                <mesh position={[0, 0.1, -0.91]} castShadow>
+                    <sphereGeometry args={[0.07, 16, 16]} />
+                    <meshStandardMaterial color="#ff9999" />
+                </mesh>
+
+                {/* Tail */}
+                <mesh position={[0, 0.2, 0.7]} rotation={[Math.PI / 4, 0, 0]} castShadow>
+                    <cylinderGeometry args={[0.08, 0.12, 0.8, 8]} />
+                    <meshStandardMaterial color={catColor} />
+                </mesh>
+            </group>
+
+            {/* Out of range indicator */}
+            {showOutOfRangeIndicator && (
+                <Html position={[npc.position.x, 1.8, npc.position.z]} center>
+                    <div className="bg-black bg-opacity-80 text-white p-2 rounded text-sm animate-bounce">
+                        <p>Too far away!<br />Move closer to interact</p>
+                    </div>
+                </Html>
+            )}
 
             {/* Convinced timer display */}
             {npc.isConvinced && (
@@ -287,9 +419,8 @@ function NPC({
                 <Html
                     position={[npc.position.x, 0, npc.position.z]}
                     center
-                    // distanceFactor={0.5} // Increased size
                     style={{
-                        transformOrigin: 'bottom center',
+                        transformOrigin: isCatAbovePlayer ? 'top center' : 'bottom center',
                         pointerEvents: 'auto'
                     }}
                 >
@@ -297,14 +428,18 @@ function NPC({
                         className="bg-black bg-opacity-80 text-white p-3 rounded w-96 flex flex-col"
                         style={{
                             position: 'absolute',
-                            bottom: '80px', // Increased distance from anchor point
+                            // If cat is above player, place below; otherwise, place above
+                            [isCatAbovePlayer ? 'top' : 'bottom']: '80px',
                             transform: 'translateX(-50%)', // Center horizontally
-                            // maxHeight: '400px',
-                            // minHeight: '200px' // Ensure minimum height
                         }}
                         onClick={handleDialogueClick}
                     >
-                        <p className="text-center font-bold mb-2">Talking to NPC {npc.id}</p>
+                        <p className="text-center font-bold mb-2">
+                            Talking to Cat {npc.id}
+                            {npc.convincedThroughDialogue && (
+                                <span className="ml-2 text-green-400">(Convinced!)</span>
+                            )}
+                        </p>
 
                         {/* Display conversation history */}
                         <div
@@ -314,21 +449,21 @@ function NPC({
                         >
                             {npc.conversationHistory.map((msg, idx) => (
                                 <div key={idx} className={`mb-2 ${msg.role === 'user' ? 'text-green-400' : 'text-blue-400'}`}>
-                                    <span className="font-bold">{msg.role === 'user' ? 'You' : 'NPC'}:</span> {msg.content}
+                                    <span className="font-bold">{msg.role === 'user' ? 'You' : 'Cat'}:</span> {msg.content}
                                 </div>
                             ))}
 
                             {/* Show AI response if available */}
                             {npc.aiResponse?.result?.message && (
                                 <div className="mb-2 text-blue-400">
-                                    <span className="font-bold">NPC:</span> {npc.aiResponse.result.message}
+                                    <span className="font-bold">Cat:</span> {npc.aiResponse.result.message}
                                 </div>
                             )}
 
                             {/* Show typing indicator */}
                             {npc.isTyping && (
                                 <div className="mb-2 text-gray-400">
-                                    <span className="font-bold">NPC:</span> <span className="animate-pulse">...</span>
+                                    <span className="font-bold">Cat:</span> <span className="animate-pulse">...</span>
                                 </div>
                             )}
                         </div>
@@ -355,23 +490,31 @@ function NPC({
                             </div>
                         )}
 
-                        {/* Input form */}
+                        {/* Show message when convinced */}
+                        {npc.convincedThroughDialogue && (
+                            <div className="my-2 text-green-400 bg-black bg-opacity-50 p-2 rounded text-center">
+                                <p>This cat is now heading to the target!</p>
+                                <p className="text-xs mt-1">Dialogue will close automatically after timer</p>
+                            </div>
+                        )}
+
+                        {/* Input form - disabled when convinced */}
                         <form onSubmit={handleSendMessage} className="flex flex-col gap-2 mt-2">
                             <input
                                 type="text"
                                 value={message}
                                 onChange={(e) => setMessage(e.target.value)}
-                                placeholder="Type your message..."
-                                className="p-2 rounded bg-gray-800 text-white w-full"
-                                autoFocus
-                                disabled={npc.isTyping || npc.readTimeRemaining > 0}
+                                placeholder={npc.convincedThroughDialogue ? "Cat is convinced!" : "Type your message..."}
+                                className={`p-2 rounded bg-gray-800 text-white w-full ${npc.convincedThroughDialogue ? 'opacity-50' : ''}`}
+                                autoFocus={!npc.convincedThroughDialogue}
+                                disabled={isInputDisabled}
                                 onClick={handleInputClick}
                             />
                             <div className="flex justify-between">
                                 <button
                                     type="submit"
-                                    className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded ${(npc.isTyping || npc.readTimeRemaining > 0) ? 'opacity-50 cursor-not-allowed' : ''}`}
-                                    disabled={npc.isTyping || npc.readTimeRemaining > 0}
+                                    className={`bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded ${isInputDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    disabled={isInputDisabled}
                                     onClick={(e) => e.stopPropagation()}
                                 >
                                     Send
@@ -402,11 +545,169 @@ function NPC({
 function Waypoint({ waypoint }: { waypoint: Waypoint }) {
     return (
         <group position={[waypoint.position.x, 0, waypoint.position.z]}>
-            <mesh position={[0, 0.25, 0]}>
-                <cylinderGeometry args={[1, 1, 0.5, 32]} />
-                <meshStandardMaterial color={waypoint.isTarget ? "#ffff00" : "#aaaaaa"} />
-            </mesh>
-            <Html position={[0, 1.5, 0]} center>
+            {/* Render different models based on waypoint type */}
+            {waypoint.type === 'lightpole' && (
+                <group>
+                    {/* Pole */}
+                    <mesh position={[0, 1.25, 0]} castShadow>
+                        <cylinderGeometry args={[0.1, 0.2, 2.5, 8]} />
+                        <meshStandardMaterial color="#555555" />
+                    </mesh>
+                    {/* Light */}
+                    <mesh position={[0, 2.7, 0]} castShadow>
+                        <sphereGeometry args={[0.3, 16, 16]} />
+                        <meshStandardMaterial
+                            color="#ffffaa"
+                            emissive="#ffffaa"
+                            emissiveIntensity={0.5}
+                        />
+                    </mesh>
+                </group>
+            )}
+
+            {waypoint.type === 'bush' && (
+                <group>
+                    {/* Bush leaves */}
+                    <mesh position={[0, 0.6, 0]} castShadow>
+                        <sphereGeometry args={[1, 16, 16]} />
+                        <meshStandardMaterial color="#1a8f3a" />
+                    </mesh>
+                    {/* Smaller inner leaves */}
+                    <mesh position={[0.3, 0.8, 0.3]} castShadow>
+                        <sphereGeometry args={[0.6, 16, 16]} />
+                        <meshStandardMaterial color="#26a64a" />
+                    </mesh>
+                    <mesh position={[-0.4, 0.7, -0.2]} castShadow>
+                        <sphereGeometry args={[0.7, 16, 16]} />
+                        <meshStandardMaterial color="#1a8f3a" />
+                    </mesh>
+                </group>
+            )}
+
+            {waypoint.type === 'bench' && (
+                <group>
+                    {/* Seat */}
+                    <mesh position={[0, 0.5, 0]} castShadow>
+                        <boxGeometry args={[2, 0.1, 0.7]} />
+                        <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    {/* Backrest */}
+                    <mesh position={[0, 1, -0.3]} castShadow rotation={[0.3, 0, 0]}>
+                        <boxGeometry args={[2, 0.7, 0.1]} />
+                        <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    {/* Legs */}
+                    <mesh position={[-0.8, 0.25, 0]} castShadow>
+                        <boxGeometry args={[0.1, 0.5, 0.6]} />
+                        <meshStandardMaterial color="#5c2c0d" />
+                    </mesh>
+                    <mesh position={[0.8, 0.25, 0]} castShadow>
+                        <boxGeometry args={[0.1, 0.5, 0.6]} />
+                        <meshStandardMaterial color="#5c2c0d" />
+                    </mesh>
+                </group>
+            )}
+
+            {waypoint.type === 'fountain' && (
+                <group>
+                    {/* Base */}
+                    <mesh position={[0, 0.2, 0]} receiveShadow>
+                        <cylinderGeometry args={[1.5, 1.7, 0.4, 32]} />
+                        <meshStandardMaterial color="#aaaaaa" />
+                    </mesh>
+                    {/* Water basin */}
+                    <mesh position={[0, 0.5, 0]} receiveShadow>
+                        <cylinderGeometry args={[1.2, 1.2, 0.4, 32]} />
+                        <meshStandardMaterial color="#aaaaaa" />
+                    </mesh>
+                    {/* Center pillar */}
+                    <mesh position={[0, 0.8, 0]} castShadow>
+                        <cylinderGeometry args={[0.2, 0.3, 0.6, 16]} />
+                        <meshStandardMaterial color="#888888" />
+                    </mesh>
+                    {/* Water (animated in a full implementation) */}
+                    <mesh position={[0, 0.6, 0]} receiveShadow>
+                        <cylinderGeometry args={[1, 1, 0.1, 32]} />
+                        <meshStandardMaterial
+                            color="#5c94e0"
+                            transparent
+                            opacity={0.7}
+                        />
+                    </mesh>
+                </group>
+            )}
+
+            {waypoint.type === 'tree' && (
+                <group>
+                    {/* Trunk */}
+                    <mesh position={[0, 1, 0]} castShadow>
+                        <cylinderGeometry args={[0.3, 0.5, 2, 8]} />
+                        <meshStandardMaterial color="#6d4c33" />
+                    </mesh>
+                    {/* Leaves */}
+                    <mesh position={[0, 2.5, 0]} castShadow>
+                        <sphereGeometry args={[1.5, 16, 16]} />
+                        <meshStandardMaterial color="#1d7e3a" />
+                    </mesh>
+                    <mesh position={[0.5, 3, 0.5]} castShadow>
+                        <sphereGeometry args={[0.8, 16, 16]} />
+                        <meshStandardMaterial color="#1a8f3a" />
+                    </mesh>
+                </group>
+            )}
+
+            {waypoint.type === 'rock' && (
+                <group>
+                    <mesh position={[0, 0.6, 0]} rotation={[0.2, 0.5, 0.3]} castShadow>
+                        <boxGeometry args={[1.2, 1.2, 1.2]} />
+                        <meshStandardMaterial color="#777777" />
+                    </mesh>
+                    <mesh position={[0.3, 0.3, 0.4]} rotation={[0.4, 0.2, 0.5]} castShadow>
+                        <boxGeometry args={[0.7, 0.6, 0.8]} />
+                        <meshStandardMaterial color="#666666" />
+                    </mesh>
+                </group>
+            )}
+
+            {waypoint.type === 'signpost' && (
+                <group>
+                    {/* Post */}
+                    <mesh position={[0, 1, 0]} castShadow>
+                        <cylinderGeometry args={[0.1, 0.1, 2, 8]} />
+                        <meshStandardMaterial color="#8B4513" />
+                    </mesh>
+                    {/* Sign */}
+                    <mesh position={[0.5, 1.7, 0]} castShadow>
+                        <boxGeometry args={[1, 0.6, 0.05]} />
+                        <meshStandardMaterial color="#eedd82" />
+                    </mesh>
+                </group>
+            )}
+
+            {/* Default waypoint marker (fallback) */}
+            {!['lightpole', 'bush', 'bench', 'fountain', 'tree', 'rock', 'signpost'].includes(waypoint.type) && (
+                <mesh position={[0, 0.25, 0]}>
+                    <cylinderGeometry args={[1, 1, 0.5, 32]} />
+                    <meshStandardMaterial color={waypoint.isTarget ? "#ffff00" : "#aaaaaa"} />
+                </mesh>
+            )}
+
+            {/* Target indicator - highlight for the target waypoint */}
+            {waypoint.isTarget && (
+                <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.05, 0]}>
+                    <ringGeometry args={[1.8, 2, 32]} />
+                    <meshStandardMaterial
+                        color="#ffff00"
+                        emissive="#ffff00"
+                        emissiveIntensity={0.3}
+                        transparent
+                        opacity={0.6}
+                    />
+                </mesh>
+            )}
+
+            {/* Waypoint label */}
+            <Html position={[0, waypoint.type === 'tree' ? 4.2 : 3, 0]} center>
                 <div className="text-white bg-black bg-opacity-50 px-2 py-1 rounded text-sm font-bold">
                     {waypoint.name}{waypoint.isTarget ? " (Target)" : ""}
                 </div>
@@ -470,19 +771,51 @@ function GameManager({
     useFrame((_, delta) => {
         setNpcs(currentNpcs =>
             currentNpcs.map(npc => {
-                // Update read time countdown if response is complete
-                if (npc.isInteracting && npc.responseComplete && npc.readTimeRemaining > 0) {
+                // Find the target waypoint
+                const targetWaypoint = waypoints.find(w => w.isTarget);
+                if (!targetWaypoint) return npc;
+
+                // Check if NPC is at the target waypoint
+                const distanceToTarget = calculateDistance(npc.position, targetWaypoint.position);
+                const atTargetPosition = distanceToTarget <= targetWaypoint.radius + 1.0;
+
+                // Handle when an NPC leaves the target area but was previously convinced
+                if (npc.isConvinced && !atTargetPosition) {
+                    // If convinced cat leaves the target area, it's no longer convinced
                     return {
                         ...npc,
-                        readTimeRemaining: Math.max(0, npc.readTimeRemaining - delta)
+                        isConvinced: false,
+                        convincedTimer: 0,
+                        snarkyComment: null,
+                        convincedThroughDialogue: false // Also reset this flag
+                    };
+                }
+
+                // Update read time countdown if response is complete
+                if (npc.isInteracting && npc.responseComplete && npc.readTimeRemaining > 0) {
+                    const newReadTime = Math.max(0, npc.readTimeRemaining - delta);
+
+                    // Auto-close dialogue when read time completes
+                    if (newReadTime <= 0 && !npc.isTyping) {
+                        return {
+                            ...npc,
+                            readTimeRemaining: 0,
+                            isInteracting: false, // Auto-close the dialogue
+                            responseComplete: false
+                        };
+                    }
+
+                    return {
+                        ...npc,
+                        readTimeRemaining: newReadTime
                     };
                 }
 
                 // Skip updates if interacting and not in read time
                 if (npc.isInteracting && !npc.responseComplete) return npc;
 
-                // Handle convinced state
-                if (npc.isConvinced) {
+                // Handle convinced state (only applies when at target)
+                if (npc.isConvinced && atTargetPosition) {
                     // Update the timer
                     const newTimer = npc.convincedTimer - delta;
 
@@ -503,6 +836,7 @@ function GameManager({
                             targetWaypoint: randomWaypoint.id,
                             lastWaypoint: npc.targetWaypoint,
                             currentWaypoint: null,
+                            convincedThroughDialogue: false, // Reset this flag too
                             // Display snarky comment briefly before leaving
                             conversationHistory: [
                                 ...npc.conversationHistory,
@@ -527,53 +861,59 @@ function GameManager({
 
                 // Regular waypoint behavior (check if at waypoint and need to wait)
                 if (npc.targetWaypoint !== null) {
-                    const targetWaypoint = waypoints.find(w => w.id === npc.targetWaypoint);
-                    if (targetWaypoint && calculateDistance(npc.position, targetWaypoint.position) < 0.5) {
-                        // Check if NPC has reached the target waypoint
-                        if (targetWaypoint.isTarget) {
+                    const currentTargetWaypoint = waypoints.find(w => w.id === npc.targetWaypoint);
+                    if (currentTargetWaypoint) {
+                        const distance = calculateDistance(npc.position, currentTargetWaypoint.position);
+
+                        // Check if NPC is at the waypoint's radius
+                        if (distance <= currentTargetWaypoint.radius + 0.5) {
+                            // Check if NPC has reached the target waypoint AND was previously convinced through dialogue
+                            if (currentTargetWaypoint.isTarget && npc.convincedThroughDialogue) {
+                                console.log(`NPC ${npc.id} reached target and is convinced through dialogue`);
+                                return {
+                                    ...npc,
+                                    isConvinced: true,
+                                    convincedTimer: 30, // 30 seconds timer
+                                    snarkyComment: null,
+                                    dwellTime: 0
+                                };
+                            }
+
+                            // Normal waypoint dwelling logic
+                            // If at waypoint, increase dwell time
+                            const newDwellTime = npc.dwellTime + delta;
+
+                            // If dwell time is complete (2 seconds), choose new waypoint
+                            if (newDwellTime >= 2) {
+                                // Choose a new random waypoint that isn't the target and isn't the current one
+                                const availableWaypoints = waypoints.filter(w =>
+                                    !w.isTarget &&
+                                    w.id !== npc.targetWaypoint &&
+                                    w.id !== npc.lastWaypoint
+                                );
+
+                                // If somehow no waypoints are available, allow repeating
+                                const waypointsToChooseFrom = availableWaypoints.length > 0
+                                    ? availableWaypoints
+                                    : waypoints.filter(w => !w.isTarget && w.id !== npc.targetWaypoint);
+
+                                const randomWaypoint = waypointsToChooseFrom[Math.floor(Math.random() * waypointsToChooseFrom.length)];
+
+                                return {
+                                    ...npc,
+                                    dwellTime: 0,
+                                    currentWaypoint: npc.targetWaypoint,
+                                    lastWaypoint: npc.targetWaypoint,
+                                    targetWaypoint: randomWaypoint.id
+                                };
+                            }
+
+                            // Still dwelling
                             return {
                                 ...npc,
-                                isConvinced: true,
-                                convincedTimer: 30, // 30 seconds timer
-                                snarkyComment: null,
-                                dwellTime: 0
+                                dwellTime: newDwellTime
                             };
                         }
-
-                        // Normal waypoint dwelling logic
-                        // If at waypoint, increase dwell time
-                        const newDwellTime = npc.dwellTime + delta;
-
-                        // If dwell time is complete (2 seconds), choose new waypoint
-                        if (newDwellTime >= 2) {
-                            // Choose a new random waypoint that isn't the target and isn't the current one
-                            const availableWaypoints = waypoints.filter(w =>
-                                !w.isTarget &&
-                                w.id !== npc.targetWaypoint &&
-                                w.id !== npc.lastWaypoint
-                            );
-
-                            // If somehow no waypoints are available, allow repeating
-                            const waypointsToChooseFrom = availableWaypoints.length > 0
-                                ? availableWaypoints
-                                : waypoints.filter(w => !w.isTarget && w.id !== npc.targetWaypoint);
-
-                            const randomWaypoint = waypointsToChooseFrom[Math.floor(Math.random() * waypointsToChooseFrom.length)];
-
-                            return {
-                                ...npc,
-                                dwellTime: 0,
-                                currentWaypoint: npc.targetWaypoint,
-                                lastWaypoint: npc.targetWaypoint,
-                                targetWaypoint: randomWaypoint.id
-                            };
-                        }
-
-                        // Still dwelling
-                        return {
-                            ...npc,
-                            dwellTime: newDwellTime
-                        };
                     }
                 }
 
@@ -597,10 +937,13 @@ export default function Game() {
 
     // Game state
     const [waypoints, setWaypoints] = useState<Waypoint[]>([
-        { id: 1, name: "Light Pole", position: { x: 10, z: 10 }, isTarget: true },
-        { id: 2, name: "Bush", position: { x: -10, z: 10 }, isTarget: false },
-        { id: 3, name: "Bench", position: { x: 10, z: -10 }, isTarget: false },
-        { id: 4, name: "Fountain", position: { x: -10, z: -10 }, isTarget: false },
+        { id: 1, name: "Light Pole", position: { x: 10, z: 10 }, isTarget: true, type: "lightpole", radius: 1.5 },
+        { id: 2, name: "Bush", position: { x: -10, z: 10 }, isTarget: false, type: "bush", radius: 1.5 },
+        { id: 3, name: "Bench", position: { x: 10, z: -10 }, isTarget: false, type: "bench", radius: 2.0 },
+        { id: 4, name: "Fountain", position: { x: -10, z: -10 }, isTarget: false, type: "fountain", radius: 2.5 },
+        { id: 5, name: "Tree", position: { x: 15, z: 0 }, isTarget: false, type: "tree", radius: 2.0 },
+        { id: 6, name: "Rock", position: { x: -15, z: 0 }, isTarget: false, type: "rock", radius: 1.5 },
+        { id: 7, name: "Signpost", position: { x: 0, z: 15 }, isTarget: false, type: "signpost", radius: 1.0 },
     ]);
 
     const [npcs, setNpcs] = useState<NPC[]>([
@@ -622,7 +965,8 @@ export default function Game() {
             convincedTimer: 0,
             snarkyComment: null,
             readTimeRemaining: 0,
-            responseComplete: false
+            responseComplete: false,
+            convincedThroughDialogue: false
         },
         {
             id: 2,
@@ -642,7 +986,8 @@ export default function Game() {
             convincedTimer: 0,
             snarkyComment: null,
             readTimeRemaining: 0,
-            responseComplete: false
+            responseComplete: false,
+            convincedThroughDialogue: false
         },
     ]);
 
@@ -675,9 +1020,15 @@ export default function Game() {
         if (!targetWaypoint) return;
 
         const allNpcsAtTarget = npcs.every(npc => {
-            // If convinced and at target, count as at target
-            return npc.isConvinced &&
-                calculateDistance(npc.position, targetWaypoint.position) < 1.5;
+            // Check if NPC is convinced AND actually at the target waypoint
+            // Account for the waypoint radius in our distance check
+            const distance = calculateDistance(npc.position, targetWaypoint.position);
+            const atTargetPosition = distance <= targetWaypoint.radius + 1.0;
+
+            // Debug logging
+            console.log(`NPC ${npc.id}: convinced=${npc.isConvinced}, distance=${distance.toFixed(2)}, radius=${targetWaypoint.radius}, at target=${atTargetPosition}`);
+
+            return npc.isConvinced && atTargetPosition;
         });
 
         if (allNpcsAtTarget && npcs.length > 0) {
@@ -777,6 +1128,15 @@ export default function Game() {
                     if (n.id !== npcId) return n;
 
                     const newTarget = n.aiResponse?.result?.newTarget;
+                    const targetWaypointId = waypoints.find(w => w.isTarget)?.id;
+
+                    // Only mark as convinced if the AI EXPLICITLY directed the cat to the target waypoint
+                    const isNowConvinced = typeof newTarget === 'number' && newTarget === targetWaypointId;
+
+                    // Log for debugging
+                    if (isNowConvinced) {
+                        console.log(`NPC ${n.id} convinced to go to target waypoint ${targetWaypointId}`);
+                    }
 
                     // Add the AI response to conversation history
                     const updatedHistory = [
@@ -793,7 +1153,9 @@ export default function Game() {
                         conversationHistory: updatedHistory,
                         isTyping: false,
                         responseComplete: true,
-                        readTimeRemaining: calculateReadTime(n.aiResponse?.result?.message || '')
+                        readTimeRemaining: calculateReadTime(n.aiResponse?.result?.message || ''),
+                        // Set the convinced flag ONLY if the AI directed to target waypoint
+                        convincedThroughDialogue: isNowConvinced,
                     };
                 })
             );
@@ -862,12 +1224,16 @@ export default function Game() {
             aiResponse: null,
             isTyping: false,
             readTimeRemaining: 0,
-            responseComplete: false
+            responseComplete: false,
+            convincedThroughDialogue: false
         })));
 
         // Reset player position
         setPlayerPosition({ x: 0, z: 0 });
     };
+
+    // Circle of influence radius
+    const influenceRadius = 8;
 
     return (
         <div className="w-full h-full relative">
@@ -900,6 +1266,7 @@ export default function Game() {
                     position={playerPosition}
                     setPosition={setPlayerPosition}
                     disabled={npcs.some(npc => npc.isInteracting)}
+                    influenceRadius={influenceRadius}
                 />
 
                 {/* NPCs */}
@@ -910,6 +1277,8 @@ export default function Game() {
                         waypoints={waypoints}
                         onInteract={handleNpcInteraction}
                         onSendMessage={handleSendMessage}
+                        playerPosition={playerPosition}
+                        influenceRadius={influenceRadius}
                     />
                 ))}
 
@@ -928,8 +1297,8 @@ export default function Game() {
             {/* Game Instructions */}
             <div className="absolute top-4 right-4 bg-black bg-opacity-70 p-3 rounded text-white text-sm">
                 <p>Move: WASD or Arrow Keys</p>
-                <p>Interact: Click on an NPC</p>
-                <p className="mt-2">Goal: Convince all NPCs to move to the yellow target</p>
+                <p>Interact: Click on a Cat (within your influence circle)</p>
+                <p className="mt-2">Goal: Convince all Cats to move to the yellow target</p>
             </div>
 
             {/* Win Overlay */}

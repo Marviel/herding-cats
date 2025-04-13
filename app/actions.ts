@@ -213,7 +213,7 @@ export async function processNPCInteraction(
 
   (async () => {
     const { partialObjectStream } = streamObject({
-      model: openai('gpt-3.5-turbo'),
+      model: openai('gpt-4o-mini'),
       system: `You are roleplaying as an NPC in a game called "Herding Cats". 
   
 Your personality: ${npcState.personality}
